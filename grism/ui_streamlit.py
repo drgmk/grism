@@ -92,7 +92,8 @@ def _group_normality(df: pd.DataFrame, group: str, value: str, order: list[str])
     for g in order:
         vals = df.loc[df[group] == g, value].dropna().to_numpy()
         if vals.size < 3:
-            pvals[g] = None
+            # Too few points to test: assume normal (p=1).
+            pvals[g] = 1.0
             continue
         try:
             _stat, p = sps.shapiro(vals)
@@ -105,7 +106,7 @@ def _group_normality(df: pd.DataFrame, group: str, value: str, order: list[str])
 
 def _normality_label(p: Optional[float]) -> str:
     if p is None:
-        return "n/a"
+        return "error"
     return "yes" if p >= 0.05 else "no"
 
 
@@ -280,13 +281,17 @@ def main() -> None:
 
         with bottom_left:
             st.subheader("Stats")
-            st.caption(f"Pairwise test: {stat_test}")
+            st.caption(f"Normality tests -> pairwise test: {stat_test}")
+
+            error_groups = [g for g in order if normality_p.get(g) is None]
+            if error_groups:
+                st.warning(f"Normality test error for: {', '.join(error_groups)}")
 
             normality_table = pd.DataFrame(
                 [
                     ["Normal (Shapiro p>=0.05)"] + [_normality_label(normality_p[g]) for g in order],
                     ["Shapiro p-value"] + [
-                        "n/a" if normality_p[g] is None else f"{normality_p[g]:.3g}" for g in order
+                        "error" if normality_p[g] is None else f"{normality_p[g]:.3g}" for g in order
                     ],
                 ],
                 columns=["metric"] + order,
