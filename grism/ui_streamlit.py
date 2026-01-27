@@ -245,7 +245,7 @@ def main() -> None:
             elements = ["hist"]
 
         n_groups = max(int(df_plot[group].nunique(dropna=True)), 1)
-        base_w, base_h = core._compute_figsize(n_groups, scale=0.7)
+        base_w, base_h = core.compute_figsize(n_groups, scale=0.7)
         figsize = (base_w * plot_scale * x_scale, base_h * plot_scale * y_scale)
 
         title_text = custom_title if use_custom_title else ""

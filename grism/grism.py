@@ -48,7 +48,7 @@ def _resolve_style(style: Optional[str]) -> Optional[str]:
     return style
 
 
-def _compute_figsize(n_groups: int, scale: float = 2.0) -> Tuple[float, float]:
+def compute_figsize(n_groups: int, scale: float = 2.0) -> Tuple[float, float]:
     # 3h x 2w for one group, add 1w per extra group.
     width = 2.0 + max(n_groups - 1, 0) * 1.0
     height = 5.0
@@ -114,7 +114,7 @@ def plot(
     groups = list(order) if order else observed_groups
     n_groups = max(len(groups) if groups else len(observed_groups), 1)
     resolved_style = _resolve_style(style)
-    fig_size = figsize or _compute_figsize(n_groups)
+    fig_size = figsize or compute_figsize(n_groups)
 
     style_ctx = plt.style.context(resolved_style) if resolved_style else nullcontext()
     with style_ctx:

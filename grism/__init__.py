@@ -3,6 +3,7 @@
 from .grism import (
     PairwiseStatResult,
     StatResult,
+    compute_figsize,
     pairwise_stats,
     plot,
     plot_with_stats,
@@ -12,6 +13,7 @@ from .grism import (
 __all__ = [
     "PairwiseStatResult",
     "StatResult",
+    "compute_figsize",
     "pairwise_stats",
     "plot",
     "plot_with_stats",

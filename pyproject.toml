@@ -23,9 +23,6 @@ dependencies = [
 [project.optional-dependencies]
 ui = ["streamlit>=1.28"]
 
-[project.scripts]
-grism-ui = "grism.ui_streamlit:main"
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["grism*"]
