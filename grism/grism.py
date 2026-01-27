@@ -37,8 +37,8 @@ class GrismError(Exception):
 
 
 def _default_style_path() -> Path:
-    # Package lives at grism/grism.py; data/ is one level above the package dir.
-    return Path(__file__).resolve().parents[1] / "data" / "default.mplstyle"
+    # Package lives at grism/grism.py; data/ is in grism.
+    return Path(__file__).resolve().parent / "data" / "default.mplstyle"
 
 
 def _resolve_style(style: Optional[str]) -> Optional[str]:
@@ -49,7 +49,7 @@ def _resolve_style(style: Optional[str]) -> Optional[str]:
 
 
 def compute_figsize(n_groups: int, scale: float = 2.0) -> Tuple[float, float]:
-    # 3h x 2w for one group, add 1w per extra group.
+    # 5h x 2w for one group, add 1w per extra group.
     width = 2.0 + max(n_groups - 1, 0) * 1.0
     height = 5.0
     return width * scale, height * scale
@@ -68,6 +68,29 @@ def _group_order(df: pd.DataFrame, group: Optional[str]) -> List[str]:
     if isinstance(series.dtype, pd.CategoricalDtype):
         return [g for g in series.cat.categories if g in set(series.unique())]
     return list(series.unique())
+
+
+def _resolve_palette(palette: Optional[str], groups: Sequence[str]) -> Optional[List[Tuple[float, float, float]]]:
+    if not palette or not groups:
+        return None
+    try:
+        colors = sns.color_palette(palette, n_colors=len(groups))
+    except Exception:
+        return None
+    return list(colors)
+
+
+def _bar_estimator(mode: str):
+    return np.median if mode == "median" else np.mean
+
+
+def _whisker_stats(values: np.ndarray, mode: str) -> Tuple[float, float, float]:
+    if mode == "quartiles":
+        q1, med, q3 = np.percentile(values, [25, 50, 75])
+        return float(q1), float(med), float(q3)
+    mean = float(np.mean(values))
+    std = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+    return mean - std, mean, mean + std
 
 
 def _format_pvalue(p: float) -> str:
@@ -102,6 +125,10 @@ def plot(
     style: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
     order: Optional[Sequence[str]] = None,
+    whisker_mode: str = "mean-std",
+    bar_mode: str = "mean",
+    bar_fill: str = "block",
+    group_palette: Optional[str] = None,
 ) -> plt.Axes:
     """Draw a plot with one or more elements.
 
@@ -115,6 +142,7 @@ def plot(
     n_groups = max(len(groups) if groups else len(observed_groups), 1)
     resolved_style = _resolve_style(style)
     fig_size = figsize or compute_figsize(n_groups)
+    palette = _resolve_palette(group_palette, groups)
 
     style_ctx = plt.style.context(resolved_style) if resolved_style else nullcontext()
     with style_ctx:
@@ -136,38 +164,63 @@ def plot(
                 ax=ax,
             )
         else:
-            if "bar" in elements or "whisker" in elements:
-                errorbar = "se" if "whisker" in elements else None
+            if "bar" in elements:
+                estimator = _bar_estimator(bar_mode)
                 sns.barplot(
                     data=df,
                     x=group,
                     y=value,
                     hue=hue,
                     order=groups if group else None,
-                    errorbar=errorbar,
-                    capsize=0.15 if "whisker" in elements else 0,
+                    estimator=estimator,
+                    errorbar=None,
                     ax=ax,
                     dodge=bool(hue),
                     zorder=1,
                     alpha=0.9,
+                    palette=palette if hue is None else None,
                 )
+                if bar_fill == "none":
+                    for patch in ax.patches:
+                        patch.set_facecolor("none")
+                        patch.set_alpha(1.0)
+                        patch.set_edgecolor(patch.get_edgecolor() or "black")
+                        patch.set_linewidth(1.2)
+                elif bar_fill == "transparent":
+                    for patch in ax.patches:
+                        patch.set_alpha(0.5)
+
+            if "whisker" in elements and group:
+                cap = 0.06
+                xs = np.arange(len(groups))
+                for idx, g in enumerate(groups):
+                    vals = df.loc[df[group] == g, value].dropna().to_numpy()
+                    if vals.size == 0:
+                        continue
+                    low, mid, high = _whisker_stats(vals, whisker_mode)
+                    color = palette[idx] if palette else "black"
+                    ax.vlines(idx, low, high, color=color, lw=1.2, zorder=2)
+                    ax.hlines(mid, idx - 0.12, idx + 0.12, color=color, lw=1.6, zorder=3)
+                    ax.hlines(low, idx - cap, idx + cap, color=color, lw=1.2, zorder=2)
+                    ax.hlines(high, idx - cap, idx + cap, color=color, lw=1.2, zorder=2)
 
             if "strip" in elements:
                 sns.stripplot(
                     data=df,
                     x=group,
                     y=value,
-                    hue=hue if ("bar" not in elements and "whisker" not in elements) else None,
+                    hue=hue if ("bar" not in elements) else None,
                     order=groups if group else None,
                     dodge=bool(hue),
                     jitter=0.2,
                     alpha=0.8,
                     ax=ax,
                     zorder=2,
+                    palette=palette if hue is None else None,
                 )
 
             # Avoid duplicate legends when overlaying elements.
-            if hue and ("bar" in elements or "whisker" in elements) and "strip" in elements:
+            if hue and ("bar" in elements) and "strip" in elements:
                 handles, labels = ax.get_legend_handles_labels()
                 if handles:
                     keep = len(dict.fromkeys(labels))
@@ -310,6 +363,10 @@ def plot_with_stats(
     staple_scale: float = 1.0,
     order: Optional[Sequence[str]] = None,
     pairs: Optional[Sequence[Tuple[str, str]]] = None,
+    whisker_mode: str = "mean-std",
+    bar_mode: str = "mean",
+    bar_fill: str = "block",
+    group_palette: Optional[str] = None,
 ) -> Tuple[plt.Axes, Optional[StatResult], List[PairwiseStatResult]]:
     ax = plot(
         df,
@@ -324,6 +381,10 @@ def plot_with_stats(
         style=style,
         figsize=figsize,
         order=order,
+        whisker_mode=whisker_mode,
+        bar_mode=bar_mode,
+        bar_fill=bar_fill,
+        group_palette=group_palette,
     )
 
     groups = list(order) if order else _group_order(df, group)

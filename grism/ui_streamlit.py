@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import base64
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -16,7 +18,7 @@ import grism as core
 
 
 def _data_dir() -> Path:
-    return Path(__file__).resolve().parents[1] / "data"
+    return Path(__file__).resolve().parent / "data"
 
 
 def _style_options() -> Dict[str, str]:
@@ -38,6 +40,72 @@ def _style_options() -> Dict[str, str]:
     if not options:
         options["matplotlib default"] = "default"
     return options
+
+
+
+def _config_path() -> Path:
+    return Path.home() / ".grism"
+
+
+def _load_config() -> dict:
+    path = _config_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
+def _save_config(cfg: dict) -> None:
+    path = _config_path()
+    path.write_text(json.dumps(cfg, indent=2, sort_keys=True))
+
+
+def _ensure_file_config(cfg: dict, filename: str) -> dict:
+    file_cfg = cfg.get(filename)
+    if not file_cfg:
+        file_cfg = {"plots": {}, "order": [], "current": None}
+        cfg[filename] = file_cfg
+    return file_cfg
+
+
+def _new_plot_name(existing: list[str]) -> str:
+    idx = 1
+    while f"Plot {idx}" in existing:
+        idx += 1
+    return f"Plot {idx}"
+
+
+def _default_plot_config() -> dict:
+    return {
+        "group": None,
+        "value": None,
+        "hue": "(none)",
+        "elements": ["strip", "bar", "whisker"],
+        "whisker_mode": "quartiles",
+        "bar_mode": "median",
+        "bar_fill": "block",
+        "use_group_colors": True,
+        "color_cycle": "tab10",
+        "plot_scale": 1.0,
+        "x_scale": 1.0,
+        "y_scale": 1.0,
+        "order": [],
+        "pairs": [],
+        "title_enabled": False,
+        "title_text": "",
+        "xlabel_enabled": False,
+        "xlabel_text": "",
+        "ylabel_enabled": False,
+        "ylabel_text": "",
+        "staple_scale": 1.0,
+        "style_label": None,
+    }
+
+
+def _widget_key(filename: str, plot_name: str, field: str) -> str:
+    return f"{filename}:{plot_name}:{field}"
 
 
 
@@ -87,8 +155,33 @@ def _default_value_column(df: pd.DataFrame, columns: list[str], group: str) -> s
 
 
 
+
+
+
+def _set_if_missing(key: str, value) -> None:
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+def _init_widget(key: str, default) -> None:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+
+def _slider_state(label: str, key: str, min_value: float, max_value: float, step: float, default: float) -> float:
+    if key in st.session_state:
+        return st.slider(label, min_value=min_value, max_value=max_value, step=step, key=key)
+    # First render: seed with default.
+    return st.slider(label, min_value=min_value, max_value=max_value, value=default, step=step, key=key)
+
+
+
 def _ordered_selection(label: str, options: list[str], default: list[str], key: str) -> list[str]:
-    selected = st.multiselect(label, options, default=default, key=key)
+    if key in st.session_state:
+        selected = st.multiselect(label, options, key=key)
+    else:
+        selected = st.multiselect(label, options, default=default, key=key)
     order_key = f"{key}__order"
     prior = st.session_state.get(order_key, [])
     # Remove items no longer selected.
@@ -99,6 +192,46 @@ def _ordered_selection(label: str, options: list[str], default: list[str], key: 
             ordered.append(item)
     st.session_state[order_key] = ordered
     return ordered
+
+
+
+def _cycle_select(label: str, options: list[str], key: str) -> str:
+    idx_key = f"{key}__idx"
+    select_key = f"{key}__select"
+    flag_key = f"{key}__from_button"
+
+    if idx_key not in st.session_state:
+        st.session_state[idx_key] = 0
+    if flag_key not in st.session_state:
+        st.session_state[flag_key] = False
+
+    def _prev() -> None:
+        st.session_state[idx_key] = (st.session_state[idx_key] - 1) % len(options)
+        st.session_state[flag_key] = True
+
+    def _next() -> None:
+        st.session_state[idx_key] = (st.session_state[idx_key] + 1) % len(options)
+        st.session_state[flag_key] = True
+
+    # Only override the selectbox value when a button was used.
+    if st.session_state[flag_key]:
+        st.session_state[select_key] = options[st.session_state[idx_key]]
+        st.session_state[flag_key] = False
+
+    cols = st.columns([0.12, 1.0, 0.12], gap="small")
+    cols[0].caption(" ")
+    cols[0].button("◀", key=f"{key}__prev", on_click=_prev)
+    selection = cols[1].selectbox(
+        label,
+        options,
+        key=select_key,
+    )
+    cols[2].caption(" ")
+    cols[2].button("▶", key=f"{key}__next", on_click=_next)
+
+    # Sync index to selected value in case of manual select.
+    st.session_state[idx_key] = options.index(selection)
+    return selection
 
 
 
@@ -153,6 +286,77 @@ def main() -> None:
         st.info("Upload a file to begin.")
         st.stop()
 
+    filename = uploaded.name
+    cfg = _load_config()
+    file_cfg = _ensure_file_config(cfg, filename)
+
+    if not file_cfg["order"]:
+        plot_name = _new_plot_name(file_cfg["order"])
+        file_cfg["order"].append(plot_name)
+        file_cfg["plots"][plot_name] = _default_plot_config()
+        file_cfg["current"] = plot_name
+        _save_config(cfg)
+
+    plot_names = file_cfg["order"]
+    current_plot = file_cfg.get("current") or plot_names[0]
+
+    plot_row = st.sidebar.columns([0.7, 0.3], gap="small")
+    plot_key = f"{filename}__plot_select"
+    if plot_key not in st.session_state:
+        st.session_state[plot_key] = current_plot
+    pending_key = f"{plot_key}__pending"
+    if pending_key in st.session_state:
+        st.session_state[plot_key] = st.session_state.pop(pending_key)
+    selected_plot = plot_row[0].selectbox("Plot selection and rename", plot_names, key=plot_key)
+
+    # Rename current plot
+    rename_key = f"{filename}:{selected_plot}:rename"
+    if rename_key not in st.session_state:
+        st.session_state[rename_key] = selected_plot
+    new_name = plot_row[0].text_input("Rename", key=rename_key, label_visibility="collapsed")
+    if new_name and new_name != selected_plot and new_name not in plot_names:
+        file_cfg["plots"][new_name] = file_cfg["plots"].pop(selected_plot)
+        file_cfg["order"] = [new_name if p == selected_plot else p for p in file_cfg["order"]]
+        file_cfg["current"] = new_name
+        st.session_state[f"{plot_key}__pending"] = new_name
+        _save_config(cfg)
+        st.rerun()
+
+    # New/Delete buttons aligned with select/rename block
+    plot_row[1].caption(" ")
+    plot_row[1].caption(" ")
+    if plot_row[1].button("New", use_container_width=True):
+        fresh = _new_plot_name(plot_names)
+        file_cfg["order"].append(fresh)
+        file_cfg["plots"][fresh] = _default_plot_config()
+        file_cfg["current"] = fresh
+        st.session_state[f"{plot_key}__pending"] = fresh
+        _save_config(cfg)
+        st.rerun()
+
+    if plot_row[1].button("Delete", use_container_width=True):
+        if selected_plot in file_cfg["plots"]:
+            file_cfg["plots"].pop(selected_plot)
+        file_cfg["order"] = [p for p in file_cfg["order"] if p != selected_plot]
+        if not file_cfg["order"]:
+            fresh = _new_plot_name([])
+            file_cfg["order"] = [fresh]
+            file_cfg["plots"][fresh] = _default_plot_config()
+        file_cfg["current"] = file_cfg["order"][0]
+        st.session_state[f"{plot_key}__pending"] = file_cfg["current"]
+        _save_config(cfg)
+        st.rerun()
+
+    file_cfg["current"] = st.session_state[plot_key]
+    selected_plot = st.session_state[plot_key]
+
+    plot_cfg = file_cfg["plots"].setdefault(selected_plot, _default_plot_config())
+    _save_config(cfg)
+
+    plot_id = f"{filename}:{selected_plot}"
+    plot_changed = st.session_state.get("__plot_id") != plot_id
+    st.session_state["__plot_id"] = plot_id
+
     df = _load_dataframe(uploaded.getvalue(), uploaded.name)
     columns = list(df.columns)
 
@@ -160,36 +364,60 @@ def main() -> None:
         st.warning("No columns found in the uploaded file.")
         st.stop()
 
-    default_group = _default_group_column(df, columns)
+    default_group = plot_cfg.get("group") if plot_cfg.get("group") in columns else _default_group_column(df, columns)
+    group_key = _widget_key(filename, selected_plot, "group")
+    _set_if_missing(group_key, default_group)
     group = st.sidebar.selectbox(
         "Group column",
         columns,
-        index=columns.index(default_group),
+        key=group_key,
     )
 
-    default_value = _default_value_column(df, columns, group)
+    default_value = plot_cfg.get("value") if plot_cfg.get("value") in columns and plot_cfg.get("value") != group else _default_value_column(df, columns, group)
+    value_key = _widget_key(filename, selected_plot, "value")
+    _set_if_missing(value_key, default_value)
     value = st.sidebar.selectbox(
         "Value column",
         columns,
-        index=columns.index(default_value),
+        key=value_key,
     )
 
     if group == value:
         st.sidebar.warning("Group and value columns should differ.")
 
     hue_options = ["(none)"] + [c for c in columns if c not in {value, group}]
-    hue_choice = st.sidebar.selectbox("Hue (optional)", hue_options)
+    hue_default = plot_cfg.get("hue") if plot_cfg.get("hue") in hue_options else "(none)"
+    hue_key = _widget_key(filename, selected_plot, "hue")
+    _set_if_missing(hue_key, hue_default)
+    hue_choice = st.sidebar.selectbox("Hue (optional)", hue_options, key=hue_key)
     hue: Optional[str] = None if hue_choice == "(none)" else hue_choice
 
+    element_options = ["strip", "bar", "whisker", "hist"]
+    elements_default = [e for e in plot_cfg.get("elements", []) if e in element_options] or ["strip", "bar", "whisker"]
+    elements_key = _widget_key(filename, selected_plot, "elements")
+    _set_if_missing(elements_key, elements_default)
     elements = st.sidebar.multiselect(
         "Elements",
-        ["strip", "bar", "whisker", "hist"],
-        default=["strip", "bar", "whisker"],
+        element_options,
+        key=elements_key,
     )
 
-    plot_scale = st.sidebar.slider("Plot scale", min_value=0.6, max_value=1.4, value=1.0, step=0.1)
-    x_scale = st.sidebar.slider("X scale", min_value=0.6, max_value=1.4, value=1.0, step=0.1)
-    y_scale = st.sidebar.slider("Y scale", min_value=0.6, max_value=1.4, value=1.0, step=0.1)
+    whisker_mode_key = _widget_key(filename, selected_plot, "whisker_mode")
+    _set_if_missing(whisker_mode_key, plot_cfg.get("whisker_mode", "quartiles"))
+    whisker_mode = st.sidebar.radio(
+        "Whisker style",
+        ["quartiles", "mean-std"],
+        horizontal=True,
+        key=whisker_mode_key,
+    )
+    bar_mode_key = _widget_key(filename, selected_plot, "bar_mode")
+    _set_if_missing(bar_mode_key, plot_cfg.get("bar_mode", "median"))
+    bar_mode = st.sidebar.radio(
+        "Bar value",
+        ["median", "mean"],
+        horizontal=True,
+        key=bar_mode_key,
+    )
 
     top_plot_col, top_style_col, top_empty_col = st.columns([2, 1, 1], gap="large")
 
@@ -198,12 +426,35 @@ def main() -> None:
         st.subheader("Plot setup")
 
         group_values = list(pd.Series(df[group]).dropna().unique())
+        group_default = [g for g in plot_cfg.get("order", []) if g in group_values] or group_values
+        group_order_key = _widget_key(filename, selected_plot, "group_order")
+        if plot_changed:
+            st.session_state[group_order_key] = group_default
+            st.session_state[f"{group_order_key}__order"] = list(group_default)
         order = _ordered_selection(
             "Groups to plot",
             group_values,
-            default=group_values,
-            key="group_order",
+            default=group_default,
+            key=group_order_key,
         )
+
+        bar_fill_key = _widget_key(filename, selected_plot, "bar_fill")
+        _set_if_missing(bar_fill_key, plot_cfg.get("bar_fill", "block"))
+        bar_fill = st.selectbox(
+            "Bar fill",
+            ["block", "transparent", "none"],
+            key=bar_fill_key,
+        )
+        colors_key = _widget_key(filename, selected_plot, "use_group_colors")
+        _set_if_missing(colors_key, plot_cfg.get("use_group_colors", True))
+        use_group_colors = st.checkbox("Color groups", key=colors_key)
+        color_cycles = ["tab10", "Set2", "Set3", "colorblind", "deep", "muted", "pastel", "dark", "bright"]
+        cycle_key = _widget_key(filename, selected_plot, "color_cycle")
+        _set_if_missing(cycle_key, plot_cfg.get("color_cycle", color_cycles[0]))
+        if use_group_colors:
+            color_cycle = _cycle_select("Group color cycle", color_cycles, key=cycle_key)
+        else:
+            color_cycle = color_cycles[0]
         # st.caption("Only selected groups will be plotted. Order follows your selection.")
 
         pair_options = [
@@ -212,58 +463,124 @@ def main() -> None:
             for b in order[i + 1 :]
         ]
         pair_labels = [f"{a} vs {b}" for a, b in pair_options]
+        stored_pairs = plot_cfg.get("pairs", [])
+        stored_labels = [
+            f"{a} vs {b}" for a, b in stored_pairs if f"{a} vs {b}" in pair_labels
+        ]
+        pair_default = stored_labels or pair_labels
+        pair_order_key = _widget_key(filename, selected_plot, "pair_order")
+        if plot_changed:
+            st.session_state[pair_order_key] = pair_default
+            st.session_state[f"{pair_order_key}__order"] = list(pair_default)
         pair_selection = _ordered_selection(
             "Staples to show",
             pair_labels,
-            default=pair_labels,
-            key="pair_order",
+            default=pair_default,
+            key=pair_order_key,
         )
         # st.caption("Only selected pairwise staples will be shown. Order follows your selection.")
         pairs = [pair_options[pair_labels.index(label)] for label in pair_selection]
 
         title_row = st.columns([1.1, 2.4], gap="small")
-        use_custom_title = title_row[0].checkbox("Title", value=False)
+        title_en_key = _widget_key(filename, selected_plot, "title_enabled")
+        _set_if_missing(title_en_key, plot_cfg.get("title_enabled", False))
+        use_custom_title = title_row[0].checkbox("Title", key=title_en_key)
+        title_text_key = _widget_key(filename, selected_plot, "title_text")
+        _set_if_missing(title_text_key, plot_cfg.get("title_text", f"{value} by {group}"))
         custom_title = title_row[1].text_input(
             "Title text",
-            value=f"{value} by {group}",
+            value=st.session_state[title_text_key],
             disabled=not use_custom_title,
             label_visibility="collapsed",
             placeholder="Title",
+            key=title_text_key,
         )
 
         xlabel_row = st.columns([1.1, 2.4], gap="small")
-        use_custom_xlabel = xlabel_row[0].checkbox("Custom x label", value=False)
+        xlabel_en_key = _widget_key(filename, selected_plot, "xlabel_enabled")
+        _set_if_missing(xlabel_en_key, plot_cfg.get("xlabel_enabled", False))
+        use_custom_xlabel = xlabel_row[0].checkbox("Custom x label", key=xlabel_en_key)
+        xlabel_text_key = _widget_key(filename, selected_plot, "xlabel_text")
+        _set_if_missing(xlabel_text_key, plot_cfg.get("xlabel_text", ""))
         custom_xlabel = xlabel_row[1].text_input(
             "X label text",
-            value="",
+            value=st.session_state[xlabel_text_key],
             disabled=not use_custom_xlabel,
             label_visibility="collapsed",
             placeholder="X label",
+            key=xlabel_text_key,
         )
 
         ylabel_row = st.columns([1.1, 2.4], gap="small")
-        use_custom_ylabel = ylabel_row[0].checkbox("Custom y label", value=False)
+        ylabel_en_key = _widget_key(filename, selected_plot, "ylabel_enabled")
+        _set_if_missing(ylabel_en_key, plot_cfg.get("ylabel_enabled", False))
+        use_custom_ylabel = ylabel_row[0].checkbox("Custom y label", key=ylabel_en_key)
+        ylabel_text_key = _widget_key(filename, selected_plot, "ylabel_text")
+        _set_if_missing(ylabel_text_key, plot_cfg.get("ylabel_text", ""))
         custom_ylabel = ylabel_row[1].text_input(
             "Y label text",
-            value="",
+            value=st.session_state[ylabel_text_key],
             disabled=not use_custom_ylabel,
             label_visibility="collapsed",
             placeholder="Y label",
+            key=ylabel_text_key,
         )
 
     with top_empty_col:
         st.subheader("More options")
         # st.caption("If we need them...")
 
+        scale_cols = st.columns(3, gap="small")
+        plot_scale_key = _widget_key(filename, selected_plot, "plot_scale")
+        plot_scale = scale_cols[0].slider("Plot scale", min_value=0.6, max_value=1.4, value=plot_cfg.get("plot_scale", 1.0), step=0.1, key=plot_scale_key)
+        x_scale_key = _widget_key(filename, selected_plot, "x_scale")
+        x_scale = scale_cols[1].slider("X scale", min_value=0.6, max_value=1.4, value=plot_cfg.get("x_scale", 1.0), step=0.1, key=x_scale_key)
+        y_scale_key = _widget_key(filename, selected_plot, "y_scale")
+        y_scale = scale_cols[2].slider("Y scale", min_value=0.6, max_value=1.4, value=plot_cfg.get("y_scale", 1.0), step=0.1, key=y_scale_key)
+
+        staple_key = _widget_key(filename, selected_plot, "staple_scale")
+        _init_widget(staple_key, plot_cfg.get("staple_scale", 1.0))
         staple_scale = st.slider(
             "Staple spacing scale",
             min_value=0.6,
             max_value=1.8,
-            value=1.0,
             step=0.1,
+            key=staple_key,
         )
-        style_label = st.selectbox("Matplotlib style", list(style_map.keys()), index=0)
+        style_labels = list(style_map.keys())
+        style_key = _widget_key(filename, selected_plot, "style_label")
+        _set_if_missing(style_key, plot_cfg.get("style_label", style_labels[0]))
+        style_label = _cycle_select("Matplotlib style", style_labels, key=style_key)
         style_choice = style_map[style_label]
+
+    # Persist current plot config on every run.
+    plot_cfg = {
+        "group": group,
+        "value": value,
+        "hue": hue_choice,
+        "elements": elements,
+        "whisker_mode": whisker_mode,
+        "bar_mode": bar_mode,
+        "bar_fill": bar_fill,
+        "use_group_colors": use_group_colors,
+        "color_cycle": color_cycle,
+        "plot_scale": plot_scale,
+        "x_scale": x_scale,
+        "y_scale": y_scale,
+        "order": order,
+        "pairs": pairs,
+        "title_enabled": use_custom_title,
+        "title_text": custom_title,
+        "xlabel_enabled": use_custom_xlabel,
+        "xlabel_text": custom_xlabel,
+        "ylabel_enabled": use_custom_ylabel,
+        "ylabel_text": custom_ylabel,
+        "staple_scale": staple_scale,
+        "style_label": style_label,
+    }
+    file_cfg["plots"][selected_plot] = plot_cfg
+    file_cfg["current"] = selected_plot
+    _save_config(cfg)
 
     try:
         if not order:
@@ -286,6 +603,7 @@ def main() -> None:
 
         normality_p = _group_normality(df_plot, group, value, order)
         stat_test = _default_pairwise_test(normality_p)
+        group_palette = color_cycle if use_group_colors else None
 
         ax, omnibus, pairs = core.plot_with_stats(
             df_plot,
@@ -302,12 +620,41 @@ def main() -> None:
             staple_scale=staple_scale,
             order=order,
             pairs=pairs,
+            whisker_mode=whisker_mode,
+            bar_mode=bar_mode,
+            bar_fill=bar_fill,
+            group_palette=group_palette,
         )
 
         with top_plot_col:
             # st.subheader("Plot")
-            st.pyplot(ax.figure, clear_figure=True, use_container_width=False)
-            st.caption("Use the plot toolbar to download PNG/SVG/PDF.")
+            st.pyplot(ax.figure, clear_figure=False, use_container_width=False)
+
+            def _fig_bytes(fmt: str) -> bytes:
+                buf = io.BytesIO()
+                ax.figure.savefig(buf, format=fmt, bbox_inches="tight")
+                buf.seek(0)
+                return buf.read()
+
+            dcols = st.columns(3, gap="small")
+            dcols[0].download_button(
+                "Download PNG",
+                data=_fig_bytes("png"),
+                file_name="grism_plot.png",
+                mime="image/png",
+            )
+            dcols[1].download_button(
+                "Download SVG",
+                data=_fig_bytes("svg"),
+                file_name="grism_plot.svg",
+                mime="image/svg+xml",
+            )
+            dcols[2].download_button(
+                "Download PDF",
+                data=_fig_bytes("pdf"),
+                file_name="grism_plot.pdf",
+                mime="application/pdf",
+            )
 
         bottom_left, bottom_right = st.columns(2, gap="large")
 
