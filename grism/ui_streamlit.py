@@ -87,6 +87,21 @@ def _default_value_column(df: pd.DataFrame, columns: list[str], group: str) -> s
 
 
 
+def _ordered_selection(label: str, options: list[str], default: list[str], key: str) -> list[str]:
+    selected = st.multiselect(label, options, default=default, key=key)
+    order_key = f"{key}__order"
+    prior = st.session_state.get(order_key, [])
+    # Remove items no longer selected.
+    ordered = [item for item in prior if item in selected]
+    # Append newly selected items in the order they appear in `selected`.
+    for item in selected:
+        if item not in ordered:
+            ordered.append(item)
+    st.session_state[order_key] = ordered
+    return ordered
+
+
+
 def _group_normality(df: pd.DataFrame, group: str, value: str, order: list[str]) -> Dict[str, Optional[float]]:
     pvals: Dict[str, Optional[float]] = {}
     for g in order:
@@ -183,12 +198,28 @@ def main() -> None:
         st.subheader("Plot setup")
 
         group_values = list(pd.Series(df[group]).dropna().unique())
-        order = st.multiselect(
+        order = _ordered_selection(
             "Groups to plot",
             group_values,
             default=group_values,
-            help="Only selected groups will be plotted.",
+            key="group_order",
         )
+        # st.caption("Only selected groups will be plotted. Order follows your selection.")
+
+        pair_options = [
+            (a, b)
+            for i, a in enumerate(order)
+            for b in order[i + 1 :]
+        ]
+        pair_labels = [f"{a} vs {b}" for a, b in pair_options]
+        pair_selection = _ordered_selection(
+            "Staples to show",
+            pair_labels,
+            default=pair_labels,
+            key="pair_order",
+        )
+        # st.caption("Only selected pairwise staples will be shown. Order follows your selection.")
+        pairs = [pair_options[pair_labels.index(label)] for label in pair_selection]
 
         title_row = st.columns([1.1, 2.4], gap="small")
         use_custom_title = title_row[0].checkbox("Title", value=False)
@@ -270,6 +301,7 @@ def main() -> None:
             figsize=figsize,
             staple_scale=staple_scale,
             order=order,
+            pairs=pairs,
         )
 
         with top_plot_col:

@@ -309,6 +309,7 @@ def plot_with_stats(
     figsize: Optional[Tuple[float, float]] = None,
     staple_scale: float = 1.0,
     order: Optional[Sequence[str]] = None,
+    pairs: Optional[Sequence[Tuple[str, str]]] = None,
 ) -> Tuple[plt.Axes, Optional[StatResult], List[PairwiseStatResult]]:
     ax = plot(
         df,
@@ -332,10 +333,20 @@ def plot_with_stats(
     stats_out = stats(df, value=value, group=group, test=test)
     if isinstance(stats_out, list):
         omnibus = None
-        pairs = stats_out
+        pairs_out = stats_out
     else:
         omnibus = stats_out
-        pairs = pairwise_stats(df, value=value, group=group, test=test)
+        pairs_out = pairwise_stats(df, value=value, group=group, test=test)
 
-    _annotate_pairwise(ax, pairs, groups, staple_scale=staple_scale)
-    return ax, omnibus, pairs
+    if pairs is not None:
+        pair_map = {(p.group_a, p.group_b): p for p in pairs_out}
+        ordered: List[PairwiseStatResult] = []
+        for a, b in pairs:
+            if (a, b) in pair_map:
+                ordered.append(pair_map[(a, b)])
+            elif (b, a) in pair_map:
+                ordered.append(pair_map[(b, a)])
+        pairs_out = ordered
+
+    _annotate_pairwise(ax, pairs_out, groups, staple_scale=staple_scale)
+    return ax, omnibus, pairs_out
