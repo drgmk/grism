@@ -43,6 +43,39 @@ def _style_options() -> Dict[str, str]:
 
 
 
+def _jsonify(obj):
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if hasattr(obj, "item"):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    if isinstance(obj, dict):
+        return {str(k): _jsonify(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonify(v) for v in obj]
+    return str(obj)
+
+
+
+def _guess_wide_form(df: pd.DataFrame) -> bool:
+    if df.empty or df.shape[1] < 2:
+        return False
+    nrows = len(df)
+    # Count columns with repeated values (potential group/id cols).
+    repeated_cols = [c for c in df.columns if df[c].nunique(dropna=True) < nrows]
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    # Heuristic: if no repeated columns and multiple numeric columns, likely wide.
+    if not repeated_cols and len(numeric_cols) >= 2:
+        return True
+    # If there is exactly one repeated column and many numeric columns, maybe wide with an ID column.
+    if len(repeated_cols) == 1 and len(numeric_cols) >= 2:
+        return True
+    return False
+
+
+
 def _config_path() -> Path:
     return Path.home() / ".grism"
 
@@ -59,7 +92,7 @@ def _load_config() -> dict:
 
 def _save_config(cfg: dict) -> None:
     path = _config_path()
-    path.write_text(json.dumps(cfg, indent=2, sort_keys=True))
+    path.write_text(json.dumps(_jsonify(cfg), indent=2, sort_keys=True))
 
 
 def _ensure_file_config(cfg: dict, filename: str) -> dict:
@@ -195,13 +228,17 @@ def _ordered_selection(label: str, options: list[str], default: list[str], key: 
 
 
 
-def _cycle_select(label: str, options: list[str], key: str) -> str:
+def _cycle_select(label: str, options: list[str], key: str, default: str) -> str:
     idx_key = f"{key}__idx"
     select_key = f"{key}__select"
     flag_key = f"{key}__from_button"
 
+    default_value = default if default in options else options[0]
+
     if idx_key not in st.session_state:
-        st.session_state[idx_key] = 0
+        st.session_state[idx_key] = options.index(default_value)
+    if select_key not in st.session_state:
+        st.session_state[select_key] = default_value
     if flag_key not in st.session_state:
         st.session_state[flag_key] = False
 
@@ -276,11 +313,19 @@ def _load_dataframe(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
 def main() -> None:
     st.set_page_config(page_title="grism", layout="wide")
+    st.markdown("""
+        <style>
+            .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+            section[data-testid="stSidebarHeader"] > div { height: 2rem; }
+            .st-emotion-cache-10p9htt { margin-bottom: 1rem !important; height: 2rem !important; }
+        </style>
+    """, unsafe_allow_html=True)
     st.title("grism")
     # st.caption("Simple biology-style plots with stats and annotations")
 
     st.sidebar.header("Basic setup")
-    uploaded = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"])
+    uploaded = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"],
+                                        label_visibility="collapsed")
 
     if not uploaded:
         st.info("Upload a file to begin.")
@@ -353,18 +398,50 @@ def main() -> None:
     plot_cfg = file_cfg["plots"].setdefault(selected_plot, _default_plot_config())
     _save_config(cfg)
 
-    plot_id = f"{filename}:{selected_plot}"
-    plot_changed = st.session_state.get("__plot_id") != plot_id
-    st.session_state["__plot_id"] = plot_id
-
     df = _load_dataframe(uploaded.getvalue(), uploaded.name)
+
+    wide_key = _widget_key(filename, selected_plot, "wide_form")
+    wide_default = plot_cfg.get("wide_form", _guess_wide_form(df))
+    _init_widget(wide_key, wide_default)
+    wide_form = st.sidebar.checkbox("Table is wide form", key=wide_key)
+
+    if wide_form:
+        id_cols = list(df.columns)
+        id_key = _widget_key(filename, selected_plot, "wide_id_cols")
+        if id_key not in st.session_state:
+            # First time: assume first column is an ID to keep.
+            st.session_state[id_key] = [id_cols[0]] if id_cols else []
+        id_keep = st.sidebar.multiselect(
+            "Columns not to melt",
+            id_cols,
+            key=id_key,
+            help="These columns stay as identifiers; all others become groups.",
+        )
+        value_name = "value"
+        var_name = "group"
+        df = df.melt(id_vars=id_keep, var_name=var_name, value_name=value_name)
+
     columns = list(df.columns)
 
+    if wide_form:
+        plot_cfg["group"] = "group"
+        plot_cfg["value"] = "value"
+
+    plot_id = f"{filename}:{selected_plot}:{wide_form}"
+    plot_changed = st.session_state.get("__plot_id") != plot_id
+    st.session_state["__plot_id"] = plot_id
     if not columns:
         st.warning("No columns found in the uploaded file.")
         st.stop()
 
-    default_group = plot_cfg.get("group") if plot_cfg.get("group") in columns else _default_group_column(df, columns)
+    if plot_changed:
+        st.session_state.pop(_widget_key(filename, selected_plot, "group"), None)
+        st.session_state.pop(_widget_key(filename, selected_plot, "value"), None)
+
+    if wide_form and "group" in columns:
+        default_group = "group"
+    else:
+        default_group = plot_cfg.get("group") if plot_cfg.get("group") in columns else _default_group_column(df, columns)
     group_key = _widget_key(filename, selected_plot, "group")
     _set_if_missing(group_key, default_group)
     group = st.sidebar.selectbox(
@@ -373,7 +450,10 @@ def main() -> None:
         key=group_key,
     )
 
-    default_value = plot_cfg.get("value") if plot_cfg.get("value") in columns and plot_cfg.get("value") != group else _default_value_column(df, columns, group)
+    if wide_form and "value" in columns and "value" != group:
+        default_value = "value"
+    else:
+        default_value = plot_cfg.get("value") if plot_cfg.get("value") in columns and plot_cfg.get("value") != group else _default_value_column(df, columns, group)
     value_key = _widget_key(filename, selected_plot, "value")
     _set_if_missing(value_key, default_value)
     value = st.sidebar.selectbox(
@@ -452,7 +532,7 @@ def main() -> None:
         cycle_key = _widget_key(filename, selected_plot, "color_cycle")
         _set_if_missing(cycle_key, plot_cfg.get("color_cycle", color_cycles[0]))
         if use_group_colors:
-            color_cycle = _cycle_select("Group color cycle", color_cycles, key=cycle_key)
+            color_cycle = _cycle_select("Group color cycle", color_cycles, key=cycle_key, default=plot_cfg.get("color_cycle", color_cycles[0]))
         else:
             color_cycle = color_cycles[0]
         # st.caption("Only selected groups will be plotted. Order follows your selection.")
@@ -527,7 +607,7 @@ def main() -> None:
         )
 
     with top_empty_col:
-        st.subheader("More options")
+        st.subheader(" ")
         # st.caption("If we need them...")
 
         scale_cols = st.columns(3, gap="small")
@@ -550,7 +630,7 @@ def main() -> None:
         style_labels = list(style_map.keys())
         style_key = _widget_key(filename, selected_plot, "style_label")
         _set_if_missing(style_key, plot_cfg.get("style_label", style_labels[0]))
-        style_label = _cycle_select("Matplotlib style", style_labels, key=style_key)
+        style_label = _cycle_select("Matplotlib style", style_labels, key=style_key, default=plot_cfg.get("style_label", style_labels[0]))
         style_choice = style_map[style_label]
 
     # Persist current plot config on every run.
@@ -577,6 +657,9 @@ def main() -> None:
         "ylabel_text": custom_ylabel,
         "staple_scale": staple_scale,
         "style_label": style_label,
+        "style_choice": style_choice,
+        "wide_form": wide_form,
+        "wide_id_cols": id_keep if wide_form else [],
     }
     file_cfg["plots"][selected_plot] = plot_cfg
     file_cfg["current"] = selected_plot
@@ -630,27 +713,29 @@ def main() -> None:
             # st.subheader("Plot")
             st.pyplot(ax.figure, clear_figure=False, use_container_width=False)
 
+        with top_empty_col:
             def _fig_bytes(fmt: str) -> bytes:
                 buf = io.BytesIO()
                 ax.figure.savefig(buf, format=fmt, bbox_inches="tight")
                 buf.seek(0)
                 return buf.read()
 
+            st.caption("Download")
             dcols = st.columns(3, gap="small")
             dcols[0].download_button(
-                "Download PNG",
+                "PNG",
                 data=_fig_bytes("png"),
                 file_name="grism_plot.png",
                 mime="image/png",
             )
             dcols[1].download_button(
-                "Download SVG",
+                "SVG",
                 data=_fig_bytes("svg"),
                 file_name="grism_plot.svg",
                 mime="image/svg+xml",
             )
             dcols[2].download_button(
-                "Download PDF",
+                "PDF",
                 data=_fig_bytes("pdf"),
                 file_name="grism_plot.pdf",
                 mime="application/pdf",
