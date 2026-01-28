@@ -1,6 +1,8 @@
 # grism
 
-Simple biology-style plots with stats and annotations.
+Simple grouped plots with stats and annotations.
+
+![screenshot.png](screenshot.png)
 
 ## Install
 
