@@ -698,8 +698,9 @@ def main() -> None:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Include": st.column_config.CheckboxColumn("Include", default=True),
+                    "Include": st.column_config.CheckboxColumn("Include", default=True, width="small"),
                 },
+                column_order=["Include"] + columns,
             )
         include_vals = edited["Include"].tolist() if "Include" in edited.columns else [True] * len(df)
         st.session_state[include_key] = include_vals
