@@ -129,6 +129,8 @@ def plot(
     bar_mode: str = "mean",
     bar_fill: str = "block",
     group_palette: Optional[str] = None,
+    rotate_xticks: bool = False,
+    y_zero: bool = False,
 ) -> plt.Axes:
     """Draw a plot with one or more elements.
 
@@ -232,6 +234,13 @@ def plot(
     elif group:
         ax.set_xlabel(group)
     ax.set_ylabel(ylabel or value)
+    if rotate_xticks:
+        for label in ax.get_xticklabels():
+            label.set_rotation(30)
+            label.set_ha("right")
+    if y_zero:
+        y_min, y_max = ax.get_ylim()
+        ax.set_ylim(0, y_max)
     return ax
 
 
@@ -367,6 +376,8 @@ def plot_with_stats(
     bar_mode: str = "mean",
     bar_fill: str = "block",
     group_palette: Optional[str] = None,
+    rotate_xticks: bool = False,
+    y_zero: bool = False,
 ) -> Tuple[plt.Axes, Optional[StatResult], List[PairwiseStatResult]]:
     ax = plot(
         df,
@@ -385,6 +396,8 @@ def plot_with_stats(
         bar_mode=bar_mode,
         bar_fill=bar_fill,
         group_palette=group_palette,
+        rotate_xticks=rotate_xticks,
+        y_zero=y_zero,
     )
 
     groups = list(order) if order else _group_order(df, group)

@@ -519,7 +519,7 @@ def main() -> None:
         )
 
         bar_fill_key = _widget_key(filename, selected_plot, "bar_fill")
-        _set_if_missing(bar_fill_key, plot_cfg.get("bar_fill", "block"))
+        _set_if_missing(bar_fill_key, plot_cfg.get("bar_fill", "transparent"))
         bar_fill = st.selectbox(
             "Bar fill",
             ["block", "transparent", "none"],
@@ -542,10 +542,10 @@ def main() -> None:
             for i, a in enumerate(order)
             for b in order[i + 1 :]
         ]
-        pair_labels = [f"{a} vs {b}" for a, b in pair_options]
+        pair_labels = [f"{a}-{b}" for a, b in pair_options]
         stored_pairs = plot_cfg.get("pairs", [])
         stored_labels = [
-            f"{a} vs {b}" for a, b in stored_pairs if f"{a} vs {b}" in pair_labels
+            f"{a}-{b}" for a, b in stored_pairs if f"{a}-{b}" in pair_labels
         ]
         pair_default = stored_labels or pair_labels
         pair_order_key = _widget_key(filename, selected_plot, "pair_order")
@@ -607,8 +607,16 @@ def main() -> None:
         )
 
     with top_empty_col:
-        st.subheader(" ")
+        st.subheader("More options")
         # st.caption("If we need them...")
+
+        rotate_key = _widget_key(filename, selected_plot, "rotate_xticks")
+        _init_widget(rotate_key, plot_cfg.get("rotate_xticks", False))
+        rotate_xticks = st.checkbox("Rotate x labels", key=rotate_key)
+
+        yzero_key = _widget_key(filename, selected_plot, "y_zero")
+        _init_widget(yzero_key, plot_cfg.get("y_zero", True))
+        y_zero = st.checkbox("Y-axis starts at 0", key=yzero_key)
 
         scale_cols = st.columns(3, gap="small")
         plot_scale_key = _widget_key(filename, selected_plot, "plot_scale")
@@ -660,6 +668,8 @@ def main() -> None:
         "style_choice": style_choice,
         "wide_form": wide_form,
         "wide_id_cols": id_keep if wide_form else [],
+        "rotate_xticks": rotate_xticks,
+        "y_zero": y_zero,
     }
     file_cfg["plots"][selected_plot] = plot_cfg
     file_cfg["current"] = selected_plot
@@ -707,6 +717,8 @@ def main() -> None:
             bar_mode=bar_mode,
             bar_fill=bar_fill,
             group_palette=group_palette,
+            rotate_xticks=rotate_xticks,
+            y_zero=y_zero,
         )
 
         with top_plot_col:
