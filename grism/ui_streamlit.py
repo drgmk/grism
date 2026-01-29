@@ -423,6 +423,16 @@ def main() -> None:
 
     columns = list(df.columns)
 
+    # Row inclusion filter (post-melt if wide form is enabled).
+    include_key = _widget_key(filename, selected_plot, "row_include")
+    if include_key not in st.session_state:
+        st.session_state[include_key] = [True] * len(df)
+    include_series = st.session_state[include_key]
+    if len(include_series) != len(df):
+        include_series = [True] * len(df)
+        st.session_state[include_key] = include_series
+    df = df.assign(Include=include_series)
+
     if wide_form:
         plot_cfg["group"] = "group"
         plot_cfg["value"] = "value"
@@ -676,11 +686,32 @@ def main() -> None:
     _save_config(cfg)
 
     try:
+        bottom_left, bottom_right = st.columns(2, gap="large")
         if not order:
             st.warning("Select at least one group to plot.")
             st.stop()
 
+        with bottom_right:
+            st.subheader("Data preview")
+            edited = st.data_editor(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Include": st.column_config.CheckboxColumn("Include", default=True),
+                },
+            )
+        include_vals = edited["Include"].tolist() if "Include" in edited.columns else [True] * len(df)
+        st.session_state[include_key] = include_vals
+        df = edited
+
+        if include_vals != include_series:
+            st.rerun()
+
         df_plot = df[df[group].isin(order)].copy()
+
+        if "Include" in df_plot.columns:
+            df_plot = df_plot[df_plot["Include"]].drop(columns=["Include"])
 
         if "hist" in elements and len(elements) > 1:
             st.sidebar.warning("Histogram is best used alone. Showing histogram only.")
@@ -753,8 +784,6 @@ def main() -> None:
                 mime="application/pdf",
             )
 
-        bottom_left, bottom_right = st.columns(2, gap="large")
-
         with bottom_left:
             st.subheader("Stats")
             st.caption(f"Normality tests -> pairwise test: {stat_test}")
@@ -788,9 +817,6 @@ def main() -> None:
                 ]
                 st.dataframe(pd.DataFrame(pair_rows), use_container_width=True)
 
-        with bottom_right:
-            st.subheader("Data preview")
-            st.dataframe(df.head(20), use_container_width=True)
     except Exception as exc:
         st.error(str(exc))
 
