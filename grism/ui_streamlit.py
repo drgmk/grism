@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import json
-import base64
+import zipfile
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -187,6 +187,43 @@ def _default_value_column(df: pd.DataFrame, columns: list[str], group: str) -> s
     return columns[0]
 
 
+def _auto_plot_columns(df: pd.DataFrame) -> Tuple[Optional[str], list[str]]:
+    columns = list(df.columns)
+    if not columns:
+        return None, []
+    group_col = _default_group_column(df, columns)
+    value_cols = [c for c in columns if c != group_col] or [group_col]
+    return group_col, value_cols
+
+
+def _sync_file_plots_with_columns(file_cfg: dict, df: pd.DataFrame) -> bool:
+    group_col, value_cols = _auto_plot_columns(df)
+    if not value_cols:
+        return False
+
+    changed = False
+    for value_col in value_cols:
+        if value_col in file_cfg["plots"]:
+            continue
+        cfg = _default_plot_config()
+        cfg["group"] = group_col
+        cfg["value"] = value_col
+        file_cfg["plots"][value_col] = cfg
+        file_cfg["order"].append(value_col)
+        changed = True
+
+    if not file_cfg["order"]:
+        file_cfg["order"] = [value_cols[0]]
+        changed = True
+
+    current = file_cfg.get("current")
+    if current not in file_cfg["plots"]:
+        file_cfg["current"] = file_cfg["order"][0]
+        changed = True
+
+    return changed
+
+
 
 
 
@@ -332,14 +369,12 @@ def main() -> None:
         st.stop()
 
     filename = uploaded.name
+    df = _load_dataframe(uploaded.getvalue(), uploaded.name)
+    raw_df = df.copy()
     cfg = _load_config()
     file_cfg = _ensure_file_config(cfg, filename)
 
-    if not file_cfg["order"]:
-        plot_name = _new_plot_name(file_cfg["order"])
-        file_cfg["order"].append(plot_name)
-        file_cfg["plots"][plot_name] = _default_plot_config()
-        file_cfg["current"] = plot_name
+    if _sync_file_plots_with_columns(file_cfg, df):
         _save_config(cfg)
 
     plot_names = file_cfg["order"]
@@ -384,21 +419,26 @@ def main() -> None:
             file_cfg["plots"].pop(selected_plot)
         file_cfg["order"] = [p for p in file_cfg["order"] if p != selected_plot]
         if not file_cfg["order"]:
-            fresh = _new_plot_name([])
+            group_col, value_cols = _auto_plot_columns(df)
+            fresh = value_cols[0] if value_cols else _new_plot_name([])
+            fresh_cfg = _default_plot_config()
+            fresh_cfg["group"] = group_col
+            fresh_cfg["value"] = fresh
             file_cfg["order"] = [fresh]
-            file_cfg["plots"][fresh] = _default_plot_config()
+            file_cfg["plots"][fresh] = fresh_cfg
         file_cfg["current"] = file_cfg["order"][0]
         st.session_state[f"{plot_key}__pending"] = file_cfg["current"]
         _save_config(cfg)
         st.rerun()
+
+    apply_all_key = f"{filename}:{selected_plot}:apply_all"
+    apply_to_all = st.sidebar.button("Apply settings to all plots", key=apply_all_key)
 
     file_cfg["current"] = st.session_state[plot_key]
     selected_plot = st.session_state[plot_key]
 
     plot_cfg = file_cfg["plots"].setdefault(selected_plot, _default_plot_config())
     _save_config(cfg)
-
-    df = _load_dataframe(uploaded.getvalue(), uploaded.name)
 
     wide_key = _widget_key(filename, selected_plot, "wide_form")
     wide_default = plot_cfg.get("wide_form", _guess_wide_form(df))
@@ -426,7 +466,11 @@ def main() -> None:
     # Row inclusion filter (post-melt if wide form is enabled).
     include_key = _widget_key(filename, selected_plot, "row_include")
     if include_key not in st.session_state:
-        st.session_state[include_key] = [True] * len(df)
+        saved_include = plot_cfg.get("row_include")
+        if isinstance(saved_include, list) and len(saved_include) == len(df):
+            st.session_state[include_key] = saved_include
+        else:
+            st.session_state[include_key] = [True] * len(df)
     include_series = st.session_state[include_key]
     if len(include_series) != len(df):
         include_series = [True] * len(df)
@@ -447,6 +491,7 @@ def main() -> None:
     if plot_changed:
         st.session_state.pop(_widget_key(filename, selected_plot, "group"), None)
         st.session_state.pop(_widget_key(filename, selected_plot, "value"), None)
+        st.session_state.pop(_widget_key(filename, selected_plot, "row_include"), None)
 
     if wide_form and "group" in columns:
         default_group = "group"
@@ -482,38 +527,39 @@ def main() -> None:
     hue_choice = st.sidebar.selectbox("Hue (optional)", hue_options, key=hue_key)
     hue: Optional[str] = None if hue_choice == "(none)" else hue_choice
 
-    element_options = ["strip", "bar", "whisker", "hist"]
-    elements_default = [e for e in plot_cfg.get("elements", []) if e in element_options] or ["strip", "bar", "whisker"]
-    elements_key = _widget_key(filename, selected_plot, "elements")
-    _set_if_missing(elements_key, elements_default)
-    elements = st.sidebar.multiselect(
-        "Elements",
-        element_options,
-        key=elements_key,
-    )
-
-    whisker_mode_key = _widget_key(filename, selected_plot, "whisker_mode")
-    _set_if_missing(whisker_mode_key, plot_cfg.get("whisker_mode", "quartiles"))
-    whisker_mode = st.sidebar.radio(
-        "Whisker style",
-        ["quartiles", "mean-std"],
-        horizontal=True,
-        key=whisker_mode_key,
-    )
-    bar_mode_key = _widget_key(filename, selected_plot, "bar_mode")
-    _set_if_missing(bar_mode_key, plot_cfg.get("bar_mode", "median"))
-    bar_mode = st.sidebar.radio(
-        "Bar value",
-        ["median", "mean"],
-        horizontal=True,
-        key=bar_mode_key,
-    )
-
     top_plot_col, top_style_col, top_empty_col = st.columns([2, 1, 1], gap="large")
 
     style_map = _style_options()
     with top_style_col:
         st.subheader("Plot setup")
+
+        element_options = ["strip", "bar", "whisker", "hist"]
+        elements_default = [e for e in plot_cfg.get("elements", []) if e in element_options] or ["strip", "bar", "whisker"]
+        elements_key = _widget_key(filename, selected_plot, "elements")
+        _set_if_missing(elements_key, elements_default)
+        elements = st.multiselect(
+            "Elements",
+            element_options,
+            key=elements_key,
+        )
+
+        mode_cols = st.columns(2, gap="small")
+        whisker_mode_key = _widget_key(filename, selected_plot, "whisker_mode")
+        _set_if_missing(whisker_mode_key, plot_cfg.get("whisker_mode", "quartiles"))
+        whisker_mode = mode_cols[0].radio(
+            "Whisker style",
+            ["quartiles", "mean-std"],
+            horizontal=True,
+            key=whisker_mode_key,
+        )
+        bar_mode_key = _widget_key(filename, selected_plot, "bar_mode")
+        _set_if_missing(bar_mode_key, plot_cfg.get("bar_mode", "median"))
+        bar_mode = mode_cols[1].radio(
+            "Bar value",
+            ["median", "mean"],
+            horizontal=True,
+            key=bar_mode_key,
+        )
 
         group_values = list(pd.Series(df[group]).dropna().unique())
         group_default = [g for g in plot_cfg.get("order", []) if g in group_values] or group_values
@@ -528,23 +574,6 @@ def main() -> None:
             key=group_order_key,
         )
 
-        bar_fill_key = _widget_key(filename, selected_plot, "bar_fill")
-        _set_if_missing(bar_fill_key, plot_cfg.get("bar_fill", "transparent"))
-        bar_fill = st.selectbox(
-            "Bar fill",
-            ["block", "transparent", "none"],
-            key=bar_fill_key,
-        )
-        colors_key = _widget_key(filename, selected_plot, "use_group_colors")
-        _set_if_missing(colors_key, plot_cfg.get("use_group_colors", True))
-        use_group_colors = st.checkbox("Color groups", key=colors_key)
-        color_cycles = ["tab10", "Set2", "Set3", "colorblind", "deep", "muted", "pastel", "dark", "bright"]
-        cycle_key = _widget_key(filename, selected_plot, "color_cycle")
-        _set_if_missing(cycle_key, plot_cfg.get("color_cycle", color_cycles[0]))
-        if use_group_colors:
-            color_cycle = _cycle_select("Group color cycle", color_cycles, key=cycle_key, default=plot_cfg.get("color_cycle", color_cycles[0]))
-        else:
-            color_cycle = color_cycles[0]
         # st.caption("Only selected groups will be plotted. Order follows your selection.")
 
         pair_options = [
@@ -617,39 +646,52 @@ def main() -> None:
         )
 
     with top_empty_col:
-        st.subheader("More options")
+        st.subheader("Plot options")
         # st.caption("If we need them...")
 
+        button_cols = st.columns(2, gap="small")
         rotate_key = _widget_key(filename, selected_plot, "rotate_xticks")
         _init_widget(rotate_key, plot_cfg.get("rotate_xticks", False))
-        rotate_xticks = st.checkbox("Rotate x labels", key=rotate_key)
+        rotate_xticks = button_cols[0].checkbox("Rotate x labels", key=rotate_key)
 
         yzero_key = _widget_key(filename, selected_plot, "y_zero")
         _init_widget(yzero_key, plot_cfg.get("y_zero", True))
-        y_zero = st.checkbox("Y-axis starts at 0", key=yzero_key)
+        y_zero = button_cols[1].checkbox("Y-axis starts at 0", key=yzero_key)
 
-        scale_cols = st.columns(3, gap="small")
+        bar_fill_key = _widget_key(filename, selected_plot, "bar_fill")
+        _set_if_missing(bar_fill_key, plot_cfg.get("bar_fill", "transparent"))
+        bar_fill = st.selectbox(
+            "Bar fill",
+            ["block", "transparent", "none"],
+            key=bar_fill_key,
+        )
+        
+        style_labels = list(style_map.keys())
+        style_key = _widget_key(filename, selected_plot, "style_label")
+        _set_if_missing(style_key, plot_cfg.get("style_label", style_labels[0]))
+        style_label = _cycle_select("Matplotlib style", style_labels, key=style_key, default=plot_cfg.get("style_label", style_labels[0]))
+        style_choice = style_map[style_label]
+
+        colors_key = _widget_key(filename, selected_plot, "use_group_colors")
+        _set_if_missing(colors_key, plot_cfg.get("use_group_colors", True))
+        use_group_colors = st.checkbox("Color groups", key=colors_key)
+        color_cycles = ["tab10", "Set2", "Set3", "colorblind", "deep", "muted", "pastel", "dark", "bright"]
+        cycle_key = _widget_key(filename, selected_plot, "color_cycle")
+        _set_if_missing(cycle_key, plot_cfg.get("color_cycle", color_cycles[0]))
+        if use_group_colors:
+            color_cycle = _cycle_select("Group color cycle", color_cycles, key=cycle_key, default=plot_cfg.get("color_cycle", color_cycles[0]))
+        else:
+            color_cycle = color_cycles[0]
+
+        scale_cols = st.columns(4, gap="small")
         plot_scale_key = _widget_key(filename, selected_plot, "plot_scale")
         plot_scale = scale_cols[0].slider("Plot scale", min_value=0.6, max_value=1.4, value=plot_cfg.get("plot_scale", 1.0), step=0.1, key=plot_scale_key)
         x_scale_key = _widget_key(filename, selected_plot, "x_scale")
         x_scale = scale_cols[1].slider("X scale", min_value=0.6, max_value=1.4, value=plot_cfg.get("x_scale", 1.0), step=0.1, key=x_scale_key)
         y_scale_key = _widget_key(filename, selected_plot, "y_scale")
         y_scale = scale_cols[2].slider("Y scale", min_value=0.6, max_value=1.4, value=plot_cfg.get("y_scale", 1.0), step=0.1, key=y_scale_key)
-
         staple_key = _widget_key(filename, selected_plot, "staple_scale")
-        _init_widget(staple_key, plot_cfg.get("staple_scale", 1.0))
-        staple_scale = st.slider(
-            "Staple spacing scale",
-            min_value=0.6,
-            max_value=1.8,
-            step=0.1,
-            key=staple_key,
-        )
-        style_labels = list(style_map.keys())
-        style_key = _widget_key(filename, selected_plot, "style_label")
-        _set_if_missing(style_key, plot_cfg.get("style_label", style_labels[0]))
-        style_label = _cycle_select("Matplotlib style", style_labels, key=style_key, default=plot_cfg.get("style_label", style_labels[0]))
-        style_choice = style_map[style_label]
+        staple_scale = scale_cols[3].slider("Staple spacing", min_value=0.6, max_value=1.8, value=plot_cfg.get("staple_scale", 1.0), step=0.1, key=staple_key)
 
     # Persist current plot config on every run.
     plot_cfg = {
@@ -678,12 +720,24 @@ def main() -> None:
         "style_choice": style_choice,
         "wide_form": wide_form,
         "wide_id_cols": id_keep if wide_form else [],
+        "row_include": st.session_state.get(include_key, [True] * len(df)),
         "rotate_xticks": rotate_xticks,
         "y_zero": y_zero,
     }
     file_cfg["plots"][selected_plot] = plot_cfg
     file_cfg["current"] = selected_plot
     _save_config(cfg)
+
+    if apply_to_all:
+        source_cfg = dict(plot_cfg)
+        for plot_name in file_cfg["order"]:
+            target_cfg = file_cfg["plots"].setdefault(plot_name, _default_plot_config())
+            target_value = target_cfg.get("value", plot_name)
+            merged_cfg = dict(source_cfg)
+            merged_cfg["value"] = target_value
+            file_cfg["plots"][plot_name] = merged_cfg
+        _save_config(cfg)
+        st.rerun()
 
     try:
         bottom_left, bottom_right = st.columns(2, gap="large")
@@ -764,26 +818,175 @@ def main() -> None:
                 buf.seek(0)
                 return buf.read()
 
-            st.caption("Download")
-            dcols = st.columns(3, gap="small")
-            dcols[0].download_button(
-                "PNG",
-                data=_fig_bytes("png"),
-                file_name="grism_plot.png",
-                mime="image/png",
-            )
-            dcols[1].download_button(
-                "SVG",
-                data=_fig_bytes("svg"),
-                file_name="grism_plot.svg",
-                mime="image/svg+xml",
-            )
-            dcols[2].download_button(
-                "PDF",
-                data=_fig_bytes("pdf"),
-                file_name="grism_plot.pdf",
-                mime="application/pdf",
-            )
+            def _safe_file_stem(name: str) -> str:
+                return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in name).strip("._") or "plot"
+
+            def _plot_df_for_cfg(cfg_item: dict) -> pd.DataFrame:
+                df_item = raw_df.copy()
+                if cfg_item.get("wide_form"):
+                    id_cols = [c for c in cfg_item.get("wide_id_cols", []) if c in df_item.columns]
+                    df_item = df_item.melt(id_vars=id_cols, var_name="group", value_name="value")
+                return df_item
+
+            def _all_plots_zip_bytes(fmt: str) -> bytes:
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for plot_name in file_cfg["order"]:
+                        cfg_item = file_cfg["plots"].get(plot_name, {})
+                        group_i = cfg_item.get("group")
+                        value_i = cfg_item.get("value")
+                        if not group_i or not value_i:
+                            continue
+                        try:
+                            df_item = _plot_df_for_cfg(cfg_item)
+                            if group_i not in df_item.columns or value_i not in df_item.columns:
+                                continue
+
+                            include_i = cfg_item.get("row_include")
+                            if isinstance(include_i, list) and len(include_i) == len(df_item):
+                                df_item = df_item.assign(Include=include_i)
+                                df_item = df_item[df_item["Include"]].drop(columns=["Include"])
+
+                            order_i = [g for g in cfg_item.get("order", []) if g in set(df_item[group_i].dropna().unique())]
+                            if not order_i:
+                                order_i = list(pd.Series(df_item[group_i]).dropna().unique())
+                            if not order_i:
+                                continue
+
+                            df_plot_i = df_item[df_item[group_i].isin(order_i)].copy()
+                            if df_plot_i.empty:
+                                continue
+
+                            elements_i = cfg_item.get("elements", ["strip", "bar", "whisker"])
+                            if "hist" in elements_i and len(elements_i) > 1:
+                                elements_i = ["hist"]
+
+                            n_groups_i = max(int(df_plot_i[group_i].nunique(dropna=True)), 1)
+                            base_w_i, base_h_i = core.compute_figsize(n_groups_i, scale=0.7)
+                            plot_scale_i = cfg_item.get("plot_scale", 1.0)
+                            x_scale_i = cfg_item.get("x_scale", 1.0)
+                            y_scale_i = cfg_item.get("y_scale", 1.0)
+                            figsize_i = (base_w_i * plot_scale_i * x_scale_i, base_h_i * plot_scale_i * y_scale_i)
+
+                            hue_choice_i = cfg_item.get("hue", "(none)")
+                            hue_i = None if hue_choice_i == "(none)" else hue_choice_i
+                            if hue_i and hue_i not in df_plot_i.columns:
+                                hue_i = None
+
+                            title_i = cfg_item.get("title_text", "") if cfg_item.get("title_enabled") else ""
+                            xlabel_i = cfg_item.get("xlabel_text", "") if cfg_item.get("xlabel_enabled") else None
+                            ylabel_i = cfg_item.get("ylabel_text", "") if cfg_item.get("ylabel_enabled") else None
+
+                            normality_i = _group_normality(df_plot_i, group_i, value_i, order_i)
+                            stat_test_i = _default_pairwise_test(normality_i)
+
+                            pairs_i = []
+                            for pair in cfg_item.get("pairs", []):
+                                if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                                    a, b = pair
+                                    if a in order_i and b in order_i:
+                                        pairs_i.append((a, b))
+
+                            group_palette_i = cfg_item.get("color_cycle") if cfg_item.get("use_group_colors", True) else None
+
+                            ax_i, _, _ = core.plot_with_stats(
+                                df_plot_i,
+                                value=value_i,
+                                group=group_i,
+                                hue=hue_i,
+                                elements=elements_i,
+                                test=stat_test_i,
+                                title=title_i,
+                                xlabel=xlabel_i,
+                                ylabel=ylabel_i,
+                                style=cfg_item.get("style_choice"),
+                                figsize=figsize_i,
+                                staple_scale=cfg_item.get("staple_scale", 1.0),
+                                order=order_i,
+                                pairs=pairs_i,
+                                whisker_mode=cfg_item.get("whisker_mode", "quartiles"),
+                                bar_mode=cfg_item.get("bar_mode", "median"),
+                                bar_fill=cfg_item.get("bar_fill", "block"),
+                                group_palette=group_palette_i,
+                                rotate_xticks=cfg_item.get("rotate_xticks", False),
+                                y_zero=cfg_item.get("y_zero", False),
+                            )
+
+                            fig_i = ax_i.figure
+                            fig_buf = io.BytesIO()
+                            fig_i.savefig(fig_buf, format=fmt, bbox_inches="tight")
+                            plt.close(fig_i)
+                            fig_buf.seek(0)
+                            zf.writestr(f"{_safe_file_stem(plot_name)}.{fmt}", fig_buf.read())
+                        except Exception:
+                            continue
+
+                zip_buf.seek(0)
+                return zip_buf.read()
+
+            def _zip_state_key(fmt: str) -> str:
+                return f"{filename}:zip_bytes:{fmt}"
+
+            dl_sections = st.columns(2, gap="small")
+            with dl_sections[0]:
+                st.caption("Download current plot")
+                dcols = st.columns(3, gap="small")
+                dcols[0].download_button(
+                    "PNG",
+                    data=_fig_bytes("png"),
+                    file_name="grism_plot.png",
+                    mime="image/png",
+                )
+                dcols[1].download_button(
+                    "SVG",
+                    data=_fig_bytes("svg"),
+                    file_name="grism_plot.svg",
+                    mime="image/svg+xml",
+                )
+                dcols[2].download_button(
+                    "PDF",
+                    data=_fig_bytes("pdf"),
+                    file_name="grism_plot.pdf",
+                    mime="application/pdf",
+                )
+            with dl_sections[1]:
+                st.caption("Generate zip of all plots")
+                zcols = st.columns(3, gap="small")
+                if zcols[0].button("PNG", key=f"{filename}:download_zip:png"):
+                    with st.spinner("Building PNG zip..."):
+                        st.session_state[_zip_state_key("png")] = _all_plots_zip_bytes("png")
+                if zcols[1].button("SVG", key=f"{filename}:download_zip:svg"):
+                    with st.spinner("Building SVG zip..."):
+                        st.session_state[_zip_state_key("svg")] = _all_plots_zip_bytes("svg")
+                if zcols[2].button("PDF", key=f"{filename}:download_zip:pdf"):
+                    with st.spinner("Building PDF zip..."):
+                        st.session_state[_zip_state_key("pdf")] = _all_plots_zip_bytes("pdf")
+
+                dzcols = st.columns(3, gap="small")
+                png_zip = st.session_state.get(_zip_state_key("png"))
+                svg_zip = st.session_state.get(_zip_state_key("svg"))
+                pdf_zip = st.session_state.get(_zip_state_key("pdf"))
+                dzcols[0].download_button(
+                    "Get",
+                    data=png_zip or b"",
+                    file_name="grism_all_plots_png.zip",
+                    mime="application/zip",
+                    disabled=png_zip is None,
+                )
+                dzcols[1].download_button(
+                    "Get",
+                    data=svg_zip or b"",
+                    file_name="grism_all_plots_svg.zip",
+                    mime="application/zip",
+                    disabled=svg_zip is None,
+                )
+                dzcols[2].download_button(
+                    "Get",
+                    data=pdf_zip or b"",
+                    file_name="grism_all_plots_pdf.zip",
+                    mime="application/zip",
+                    disabled=pdf_zip is None,
+                )
 
         with bottom_left:
             st.subheader("Stats")
