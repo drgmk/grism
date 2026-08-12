@@ -1,0 +1,33 @@
+{
+  "spec_version": 1,
+  "name": "default",
+  "appearance": {
+    "elements": [
+      "strip",
+      "bar",
+      "whisker"
+    ],
+    "whisker_mode": "quartiles",
+    "estimator": "median",
+    "bar_fill": "block",
+    "use_group_colors": true,
+    "palette": "tab10",
+    "style": "default",
+    "rotate_xticks": false,
+    "y_zero": true,
+    "plot_scale": 1.0,
+    "x_scale": 1.0,
+    "y_scale": 1.0
+  },
+  "stats": {
+    "test": "auto",
+    "pairs": [],
+    "staple_scale": 1.0,
+    "staple_threshold": 0.05
+  },
+  "labels": {
+    "title": null,
+    "xlabel": null,
+    "ylabel": null
+  }
+}

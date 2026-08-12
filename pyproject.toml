@@ -17,12 +17,20 @@ dependencies = [
   "pandas>=1.5",
   "scipy>=1.10",
   "seaborn>=0.12",
-  "streamlit>=1.28",
+  "pydantic>=2",
+  "typer>=0.12",
 ]
 
 [project.optional-dependencies]
 ui = ["streamlit>=1.28"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+
+[project.scripts]
+grism = "grism.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["grism*"]
+
+[tool.setuptools.package-data]
+grism = ["data/*.mplstyle", "templates/*.json"]

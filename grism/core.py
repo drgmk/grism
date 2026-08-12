@@ -1,43 +1,43 @@
-"""Core plotting and stats helpers for grism."""
+"""Core plotting for grism.
+
+Turns a DataFrame + drawing options into a matplotlib Axes. Statistics live in
+:mod:`grism.stats`; the spec-driven entry point is :mod:`grism.render`.
+"""
 
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
-from itertools import combinations
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from scipy import stats as sps
 
+from .stats import (
+    GrismError,
+    PairwiseStatResult,
+    StatResult,
+    group_order,
+    pairwise_stats,
+    stats,
+    validate_columns,
+)
 
-@dataclass
-class StatResult:
-    test: str
-    groups: List[str]
-    statistic: float
-    pvalue: float
-
-
-@dataclass
-class PairwiseStatResult:
-    test: str
-    group_a: str
-    group_b: str
-    statistic: float
-    pvalue: float
-
-
-class GrismError(Exception):
-    """Base error for grism."""
+__all__ = [
+    "GrismError",
+    "PairwiseStatResult",
+    "StatResult",
+    "compute_figsize",
+    "compute_figsize_for",
+    "plot",
+    "plot_with_stats",
+]
 
 
 def _default_style_path() -> Path:
-    # Package lives at grism/grism.py; data/ is in grism.
+    # Package lives at grism/core.py; data/ is alongside it.
     return Path(__file__).resolve().parent / "data" / "default.mplstyle"
 
 
@@ -54,23 +54,24 @@ def compute_figsize(n_groups: int, scale: float = 2.0) -> Tuple[float, float]:
     height = 5.0
     return width * scale, height * scale
 
-def _validate_columns(df: pd.DataFrame, value: str, group: Optional[str], hue: Optional[str]) -> None:
-    missing = [c for c in [value, group, hue] if c and c not in df.columns]
-    if missing:
-        raise GrismError(f"Missing columns: {', '.join(missing)}")
+
+def compute_figsize_for(order: Sequence[str], appearance) -> Tuple[float, float]:
+    """Figure size for a spec: base size scaled by the appearance scale knobs.
+
+    ``appearance`` is a :class:`grism.spec.AppearanceSpec` (duck-typed to avoid
+    importing spec here and creating a cycle).
+    """
+    n_groups = max(len(order), 1)
+    base_w, base_h = compute_figsize(n_groups, scale=0.7)
+    plot_scale = getattr(appearance, "plot_scale", 1.0)
+    x_scale = getattr(appearance, "x_scale", 1.0)
+    y_scale = getattr(appearance, "y_scale", 1.0)
+    return base_w * plot_scale * x_scale, base_h * plot_scale * y_scale
 
 
-def _group_order(df: pd.DataFrame, group: Optional[str]) -> List[str]:
-    if not group:
-        return []
-    # Preserve input order as much as possible.
-    series = df[group]
-    if isinstance(series.dtype, pd.CategoricalDtype):
-        return [g for g in series.cat.categories if g in set(series.unique())]
-    return list(series.unique())
-
-
-def _resolve_palette(palette: Optional[str], groups: Sequence[str]) -> Optional[List[Tuple[float, float, float]]]:
+def _resolve_palette(
+    palette: Optional[str], groups: Sequence[str]
+) -> Optional[List[Tuple[float, float, float]]]:
     if not palette or not groups:
         return None
     try:
@@ -113,8 +114,8 @@ def _add_staple(ax: plt.Axes, x1: float, x2: float, y: float, h: float, text: st
 def plot(
     df: pd.DataFrame,
     *,
-    value: str,
-    group: Optional[str] = None,
+    y: str,
+    x: Optional[str] = None,
     hue: Optional[str] = None,
     elements: Iterable[str] = ("strip", "bar", "whisker"),
     title: Optional[str] = None,
@@ -126,20 +127,24 @@ def plot(
     figsize: Optional[Tuple[float, float]] = None,
     order: Optional[Sequence[str]] = None,
     whisker_mode: str = "mean-std",
-    bar_mode: str = "mean",
+    estimator: str = "mean",
     bar_fill: str = "block",
-    group_palette: Optional[str] = None,
+    palette: Optional[str] = None,
     rotate_xticks: bool = False,
     y_zero: bool = False,
 ) -> plt.Axes:
     """Draw a plot with one or more elements.
 
-    elements can include: strip, bar, whisker, hist
+    Uses seaborn's vocabulary: ``x`` (categorical/group), ``y`` (numeric),
+    ``hue``, ``order``, ``palette``, ``estimator``. elements can include:
+    strip, bar, whisker, hist.
     """
-    _validate_columns(df, value, group, hue)
+    # Internal aliases keep the body in grism's original terms.
+    value, group, group_palette, bar_mode = y, x, palette, estimator
+    validate_columns(df, value, group, hue)
     elements = list(elements)
 
-    observed_groups = _group_order(df, group) if group else []
+    observed_groups = group_order(df, group) if group else []
     groups = list(order) if order else observed_groups
     n_groups = max(len(groups) if groups else len(observed_groups), 1)
     resolved_style = _resolve_style(style)
@@ -168,11 +173,14 @@ def plot(
         else:
             if "bar" in elements:
                 estimator = _bar_estimator(bar_mode)
+                # With no real hue, colour by the x categories via hue=group +
+                # legend=False (seaborn's replacement for a bare `palette`).
+                color_by_x = hue is None and palette is not None and group is not None
                 sns.barplot(
                     data=df,
                     x=group,
                     y=value,
-                    hue=hue,
+                    hue=group if color_by_x else hue,
                     order=groups if group else None,
                     estimator=estimator,
                     errorbar=None,
@@ -180,7 +188,8 @@ def plot(
                     dodge=bool(hue),
                     zorder=1,
                     alpha=0.9,
-                    palette=palette if hue is None else None,
+                    palette=palette if color_by_x else None,
+                    legend=not color_by_x,
                 )
                 if bar_fill == "none":
                     for patch in ax.patches:
@@ -194,7 +203,6 @@ def plot(
 
             if "whisker" in elements and group:
                 cap = 0.06
-                xs = np.arange(len(groups))
                 for idx, g in enumerate(groups):
                     vals = df.loc[df[group] == g, value].dropna().to_numpy()
                     if vals.size == 0:
@@ -207,18 +215,21 @@ def plot(
                     ax.hlines(high, idx - cap, idx + cap, color=color, lw=1.2, zorder=2)
 
             if "strip" in elements:
+                strip_hue = hue if ("bar" not in elements) else None
+                color_by_x = strip_hue is None and palette is not None and group is not None
                 sns.stripplot(
                     data=df,
                     x=group,
                     y=value,
-                    hue=hue if ("bar" not in elements) else None,
+                    hue=group if color_by_x else strip_hue,
                     order=groups if group else None,
                     dodge=bool(hue),
                     jitter=0.2,
                     alpha=0.8,
                     ax=ax,
                     zorder=2,
-                    palette=palette if hue is None else None,
+                    palette=palette if color_by_x else None,
+                    legend=not color_by_x,
                 )
 
             # Avoid duplicate legends when overlaying elements.
@@ -239,84 +250,9 @@ def plot(
             label.set_rotation(30)
             label.set_ha("right")
     if y_zero:
-        y_min, y_max = ax.get_ylim()
+        _, y_max = ax.get_ylim()
         ax.set_ylim(0, y_max)
     return ax
-
-
-def _run_two_group_test(a: np.ndarray, b: np.ndarray, test: str) -> Tuple[str, float, float]:
-    test_key = test.lower()
-    if test_key in {"t_test", "ttest", "t-test", "anova", "oneway_anova"}:
-        stat, p = sps.ttest_ind(a, b, equal_var=False)
-        return "t_test", float(stat), float(p)
-    if test_key in {"mann_whitney", "mannwhitney", "u_test", "kruskal", "kruskal_wallis", "kruskal-wallis"}:
-        stat, p = sps.mannwhitneyu(a, b, alternative="two-sided")
-        return "mann_whitney", float(stat), float(p)
-    raise GrismError(f"Unknown test: {test}")
-
-
-def stats(
-    df: pd.DataFrame,
-    *,
-    value: str,
-    group: str,
-    test: str = "t_test",
-) -> Union[StatResult, List[PairwiseStatResult]]:
-    """Run a test across groups.
-
-    For two-group tests with >2 groups, return all pairwise results.
-    """
-    _validate_columns(df, value, group, None)
-    groups = _group_order(df, group)
-    if len(groups) < 2:
-        raise GrismError("Need at least two groups for a statistical test.")
-
-    data_by_group = [df.loc[df[group] == g, value].dropna().values for g in groups]
-
-    test_key = test.lower()
-    if test_key in {"t_test", "ttest", "t-test"}:
-        if len(groups) != 2:
-            return pairwise_stats(df, value=value, group=group, test=test)
-        stat, p = sps.ttest_ind(data_by_group[0], data_by_group[1], equal_var=False)
-        return StatResult("t_test", groups, float(stat), float(p))
-
-    if test_key in {"mann_whitney", "mannwhitney", "u_test"}:
-        if len(groups) != 2:
-            return pairwise_stats(df, value=value, group=group, test=test)
-        stat, p = sps.mannwhitneyu(data_by_group[0], data_by_group[1], alternative="two-sided")
-        return StatResult("mann_whitney", groups, float(stat), float(p))
-
-    if test_key in {"anova", "oneway_anova"}:
-        stat, p = sps.f_oneway(*data_by_group)
-        return StatResult("anova", groups, float(stat), float(p))
-
-    if test_key in {"kruskal", "kruskal_wallis", "kruskal-wallis"}:
-        stat, p = sps.kruskal(*data_by_group)
-        return StatResult("kruskal_wallis", groups, float(stat), float(p))
-
-    raise GrismError(f"Unknown test: {test}")
-
-
-def pairwise_stats(
-    df: pd.DataFrame,
-    *,
-    value: str,
-    group: str,
-    test: str = "t_test",
-) -> List[PairwiseStatResult]:
-    """Run pairwise tests for all group combinations."""
-    _validate_columns(df, value, group, None)
-    groups = _group_order(df, group)
-    if len(groups) < 2:
-        raise GrismError("Need at least two groups for a statistical test.")
-
-    results: List[PairwiseStatResult] = []
-    for group_a, group_b in combinations(groups, 2):
-        a = df.loc[df[group] == group_a, value].dropna().values
-        b = df.loc[df[group] == group_b, value].dropna().values
-        test_name, stat, p = _run_two_group_test(a, b, test)
-        results.append(PairwiseStatResult(test_name, group_a, group_b, stat, p))
-    return results
 
 
 def _annotate_pairwise(
@@ -324,7 +260,10 @@ def _annotate_pairwise(
     pairs: Sequence[PairwiseStatResult],
     groups: Sequence[str],
     staple_scale: float = 1.0,
+    threshold: Optional[float] = None,
 ) -> None:
+    if threshold is not None:
+        pairs = [p for p in pairs if p.pvalue < threshold]
     if not pairs or not groups:
         return
 
@@ -358,8 +297,8 @@ def _annotate_pairwise(
 def plot_with_stats(
     df: pd.DataFrame,
     *,
-    value: str,
-    group: str,
+    y: str,
+    x: str,
     hue: Optional[str] = None,
     elements: Iterable[str] = ("strip", "bar", "whisker"),
     test: str = "t_test",
@@ -370,19 +309,24 @@ def plot_with_stats(
     style: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
     staple_scale: float = 1.0,
+    staple_threshold: Optional[float] = 0.05,
     order: Optional[Sequence[str]] = None,
     pairs: Optional[Sequence[Tuple[str, str]]] = None,
     whisker_mode: str = "mean-std",
-    bar_mode: str = "mean",
+    estimator: str = "mean",
     bar_fill: str = "block",
-    group_palette: Optional[str] = None,
+    palette: Optional[str] = None,
     rotate_xticks: bool = False,
     y_zero: bool = False,
 ) -> Tuple[plt.Axes, Optional[StatResult], List[PairwiseStatResult]]:
+    """Draw plot + stats. ``staple_threshold`` draws only staples with
+    ``pvalue < threshold`` (default 0.05 = significant only); pass ``None`` to
+    draw every selected pair. The returned pairwise list is always complete."""
+    value, group = y, x  # internal aliases (see plot())
     ax = plot(
         df,
-        value=value,
-        group=group,
+        y=y,
+        x=x,
         hue=hue,
         elements=elements,
         title=title,
@@ -393,14 +337,14 @@ def plot_with_stats(
         figsize=figsize,
         order=order,
         whisker_mode=whisker_mode,
-        bar_mode=bar_mode,
+        estimator=estimator,
         bar_fill=bar_fill,
-        group_palette=group_palette,
+        palette=palette,
         rotate_xticks=rotate_xticks,
         y_zero=y_zero,
     )
 
-    groups = list(order) if order else _group_order(df, group)
+    groups = list(order) if order else group_order(df, group)
     if len(groups) < 2:
         return ax, None, []
 
@@ -422,5 +366,5 @@ def plot_with_stats(
                 ordered.append(pair_map[(b, a)])
         pairs_out = ordered
 
-    _annotate_pairwise(ax, pairs_out, groups, staple_scale=staple_scale)
+    _annotate_pairwise(ax, pairs_out, groups, staple_scale=staple_scale, threshold=staple_threshold)
     return ax, omnibus, pairs_out

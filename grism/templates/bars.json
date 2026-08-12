@@ -1,0 +1,32 @@
+{
+  "spec_version": 1,
+  "name": "bars",
+  "appearance": {
+    "elements": [
+      "bar",
+      "strip"
+    ],
+    "whisker_mode": "mean-std",
+    "estimator": "mean",
+    "bar_fill": "block",
+    "use_group_colors": true,
+    "palette": "colorblind",
+    "style": "default",
+    "rotate_xticks": false,
+    "y_zero": true,
+    "plot_scale": 1.0,
+    "x_scale": 1.0,
+    "y_scale": 1.0
+  },
+  "stats": {
+    "test": "t_test",
+    "pairs": [],
+    "staple_scale": 1.0,
+    "staple_threshold": 0.05
+  },
+  "labels": {
+    "title": null,
+    "xlabel": null,
+    "ylabel": null
+  }
+}

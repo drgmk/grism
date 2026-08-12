@@ -15,6 +15,19 @@ import streamlit as st
 from scipy import stats as sps
 
 import grism as core
+from grism.spec import (
+    AppearanceSpec,
+    BarFill,
+    DataBinding,
+    Element,
+    Estimator,
+    LabelSpec,
+    PlotSpec,
+    StatsSpec,
+    StatTest,
+    WhiskerMode,
+)
+from grism.render import render, render_bytes
 
 
 def _data_dir() -> Path:
@@ -133,6 +146,8 @@ def _default_plot_config() -> dict:
         "ylabel_enabled": False,
         "ylabel_text": "",
         "staple_scale": 1.0,
+        "staples_significant_only": True,
+        "staple_threshold": 0.05,
         "style_label": None,
     }
 
@@ -309,34 +324,90 @@ def _cycle_select(label: str, options: list[str], key: str, default: str) -> str
 
 
 
-def _group_normality(df: pd.DataFrame, group: str, value: str, order: list[str]) -> Dict[str, Optional[float]]:
-    pvals: Dict[str, Optional[float]] = {}
-    for g in order:
-        vals = df.loc[df[group] == g, value].dropna().to_numpy()
-        if vals.size < 3:
-            # Too few points to test: assume normal (p=1).
-            pvals[g] = 1.0
-            continue
-        try:
-            _stat, p = sps.shapiro(vals)
-        except Exception:
-            pvals[g] = None
-            continue
-        pvals[g] = float(p)
-    return pvals
-
-
 def _normality_label(p: Optional[float]) -> str:
     if p is None:
         return "error"
     return "yes" if p >= 0.05 else "no"
 
 
-def _default_pairwise_test(normality: Dict[str, Optional[float]]) -> str:
-    labels = [_normality_label(p) for p in normality.values()]
-    if labels and all(lbl == "yes" for lbl in labels):
-        return "t_test"
-    return "mann_whitney"
+def _canonical_spec(cfg: dict) -> PlotSpec:
+    """Map a persisted plot-config dict to a reproducible PlotSpec.
+
+    The interactive row-include mask is intentionally NOT part of the spec (it
+    is positional session state, per DESIGN.md); only dataset-reproducible
+    fields are captured, so an exported spec re-runs against raw data.
+    """
+    hue = cfg.get("hue", "(none)")
+    hue = None if hue in (None, "(none)") else hue
+    valid = {e.value for e in Element}
+    elements = [Element(e) for e in cfg.get("elements", []) if e in valid] or [
+        Element.strip,
+        Element.bar,
+        Element.whisker,
+    ]
+
+    def _label(enabled_key: str, text_key: str) -> Optional[str]:
+        return cfg.get(text_key) if cfg.get(enabled_key) else None
+
+    return PlotSpec(
+        name=str(cfg.get("value") or "Plot"),
+        data=DataBinding(
+            x=cfg.get("group"),
+            y=cfg.get("value"),
+            hue=hue,
+            order=list(cfg.get("order", []) or []),
+            wide_form=bool(cfg.get("wide_form", False)),
+            wide_id_cols=list(cfg.get("wide_id_cols", []) or []),
+        ),
+        appearance=AppearanceSpec(
+            elements=elements,
+            whisker_mode=WhiskerMode(cfg.get("whisker_mode", "quartiles")),
+            estimator=Estimator(cfg.get("bar_mode", "median")),
+            bar_fill=BarFill(cfg.get("bar_fill", "block")),
+            use_group_colors=bool(cfg.get("use_group_colors", True)),
+            palette=cfg.get("color_cycle", "tab10"),
+            style=cfg.get("style_choice") or "default",
+            rotate_xticks=bool(cfg.get("rotate_xticks", False)),
+            y_zero=bool(cfg.get("y_zero", True)),
+            plot_scale=float(cfg.get("plot_scale", 1.0)),
+            x_scale=float(cfg.get("x_scale", 1.0)),
+            y_scale=float(cfg.get("y_scale", 1.0)),
+        ),
+        stats=StatsSpec(
+            test=StatTest.auto,
+            pairs=[
+                tuple(p)
+                for p in cfg.get("pairs", [])
+                if isinstance(p, (list, tuple)) and len(p) == 2
+            ],
+            staple_scale=float(cfg.get("staple_scale", 1.0)),
+            staple_threshold=(
+                float(cfg.get("staple_threshold", 0.05))
+                if cfg.get("staples_significant_only", True)
+                else None
+            ),
+        ),
+        labels=LabelSpec(
+            title=_label("title_enabled", "title_text"),
+            xlabel=_label("xlabel_enabled", "xlabel_text"),
+            ylabel=_label("ylabel_enabled", "ylabel_text"),
+        ),
+    )
+
+
+def _prepare_ui_df(cfg: dict, raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Melt (wide form) and apply the positional row-include mask for a config.
+
+    Mirrors the interactive path so batch export matches the live preview.
+    """
+    df = raw_df.copy()
+    if cfg.get("wide_form"):
+        id_cols = [c for c in cfg.get("wide_id_cols", []) if c in df.columns]
+        df = df.melt(id_vars=id_cols, var_name="group", value_name="value")
+    include = cfg.get("row_include")
+    if isinstance(include, list) and len(include) == len(df):
+        df = df[np.asarray(include, dtype=bool)]
+    return df
 
 
 @st.cache_data
@@ -600,6 +671,22 @@ def main() -> None:
         # st.caption("Only selected pairwise staples will be shown. Order follows your selection.")
         pairs = [pair_options[pair_labels.index(label)] for label in pair_selection]
 
+        sig_row = st.columns([1.3, 1.7], gap="small")
+        sig_only_key = _widget_key(filename, selected_plot, "staples_significant_only")
+        _init_widget(sig_only_key, plot_cfg.get("staples_significant_only", True))
+        sig_only = sig_row[0].checkbox("Significant staples only", key=sig_only_key)
+        thr_key = _widget_key(filename, selected_plot, "staple_threshold")
+        staple_threshold = sig_row[1].number_input(
+            "p <",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(plot_cfg.get("staple_threshold", 0.05)),
+            step=0.01,
+            format="%.3f",
+            disabled=not sig_only,
+            key=thr_key,
+        )
+
         title_row = st.columns([1.1, 2.4], gap="small")
         title_en_key = _widget_key(filename, selected_plot, "title_enabled")
         _set_if_missing(title_en_key, plot_cfg.get("title_enabled", False))
@@ -716,6 +803,8 @@ def main() -> None:
         "ylabel_enabled": use_custom_ylabel,
         "ylabel_text": custom_ylabel,
         "staple_scale": staple_scale,
+        "staples_significant_only": sig_only,
+        "staple_threshold": staple_threshold,
         "style_label": style_label,
         "style_choice": style_choice,
         "wide_form": wide_form,
@@ -772,40 +861,22 @@ def main() -> None:
             st.sidebar.warning("Histogram is best used alone. Showing histogram only.")
             elements = ["hist"]
 
-        n_groups = max(int(df_plot[group].nunique(dropna=True)), 1)
-        base_w, base_h = core.compute_figsize(n_groups, scale=0.7)
-        figsize = (base_w * plot_scale * x_scale, base_h * plot_scale * y_scale)
+        # Build the spec from the current plot config, then render through the
+        # shared render() seam so the UI, CLI, and API stay in lock-step.
+        # df_plot is already melted/filtered here, so the preview renders a
+        # long-form frame (wide_form off); the *exported* spec keeps wide_form.
+        spec = _canonical_spec(plot_cfg)
+        preview_spec = spec.model_copy(deep=True)
+        preview_spec.data.wide_form = False
+        preview_spec.data.wide_id_cols = []
+        preview_spec.data.order = order
 
-        title_text = custom_title if use_custom_title else ""
-        xlabel_text = custom_xlabel if use_custom_xlabel else None
-        ylabel_text = custom_ylabel if use_custom_ylabel else None
-
-        normality_p = _group_normality(df_plot, group, value, order)
-        stat_test = _default_pairwise_test(normality_p)
-        group_palette = color_cycle if use_group_colors else None
-
-        ax, omnibus, pairs = core.plot_with_stats(
-            df_plot,
-            value=value,
-            group=group,
-            hue=hue,
-            elements=elements,
-            test=stat_test,
-            title=title_text,
-            xlabel=xlabel_text,
-            ylabel=ylabel_text,
-            style=style_choice,
-            figsize=figsize,
-            staple_scale=staple_scale,
-            order=order,
-            pairs=pairs,
-            whisker_mode=whisker_mode,
-            bar_mode=bar_mode,
-            bar_fill=bar_fill,
-            group_palette=group_palette,
-            rotate_xticks=rotate_xticks,
-            y_zero=y_zero,
-        )
+        res = render(preview_spec, df_plot)
+        ax = res.figure.axes[0]
+        omnibus = res.omnibus
+        pairs = res.pairwise
+        normality_p = res.normality
+        stat_test = res.resolved_test
 
         with top_plot_col:
             # st.subheader("Plot")
@@ -821,103 +892,26 @@ def main() -> None:
             def _safe_file_stem(name: str) -> str:
                 return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in name).strip("._") or "plot"
 
-            def _plot_df_for_cfg(cfg_item: dict) -> pd.DataFrame:
-                df_item = raw_df.copy()
-                if cfg_item.get("wide_form"):
-                    id_cols = [c for c in cfg_item.get("wide_id_cols", []) if c in df_item.columns]
-                    df_item = df_item.melt(id_vars=id_cols, var_name="group", value_name="value")
-                return df_item
-
             def _all_plots_zip_bytes(fmt: str) -> bytes:
                 zip_buf = io.BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     for plot_name in file_cfg["order"]:
                         cfg_item = file_cfg["plots"].get(plot_name, {})
-                        group_i = cfg_item.get("group")
-                        value_i = cfg_item.get("value")
-                        if not group_i or not value_i:
+                        if not cfg_item.get("group") or not cfg_item.get("value"):
                             continue
                         try:
-                            df_item = _plot_df_for_cfg(cfg_item)
-                            if group_i not in df_item.columns or value_i not in df_item.columns:
+                            df_item = _prepare_ui_df(cfg_item, raw_df)
+                            spec_item = _canonical_spec(cfg_item)
+                            if (
+                                spec_item.data.x not in df_item.columns
+                                or spec_item.data.y not in df_item.columns
+                            ):
                                 continue
-
-                            include_i = cfg_item.get("row_include")
-                            if isinstance(include_i, list) and len(include_i) == len(df_item):
-                                df_item = df_item.assign(Include=include_i)
-                                df_item = df_item[df_item["Include"]].drop(columns=["Include"])
-
-                            order_i = [g for g in cfg_item.get("order", []) if g in set(df_item[group_i].dropna().unique())]
-                            if not order_i:
-                                order_i = list(pd.Series(df_item[group_i]).dropna().unique())
-                            if not order_i:
-                                continue
-
-                            df_plot_i = df_item[df_item[group_i].isin(order_i)].copy()
-                            if df_plot_i.empty:
-                                continue
-
-                            elements_i = cfg_item.get("elements", ["strip", "bar", "whisker"])
-                            if "hist" in elements_i and len(elements_i) > 1:
-                                elements_i = ["hist"]
-
-                            n_groups_i = max(int(df_plot_i[group_i].nunique(dropna=True)), 1)
-                            base_w_i, base_h_i = core.compute_figsize(n_groups_i, scale=0.7)
-                            plot_scale_i = cfg_item.get("plot_scale", 1.0)
-                            x_scale_i = cfg_item.get("x_scale", 1.0)
-                            y_scale_i = cfg_item.get("y_scale", 1.0)
-                            figsize_i = (base_w_i * plot_scale_i * x_scale_i, base_h_i * plot_scale_i * y_scale_i)
-
-                            hue_choice_i = cfg_item.get("hue", "(none)")
-                            hue_i = None if hue_choice_i == "(none)" else hue_choice_i
-                            if hue_i and hue_i not in df_plot_i.columns:
-                                hue_i = None
-
-                            title_i = cfg_item.get("title_text", "") if cfg_item.get("title_enabled") else ""
-                            xlabel_i = cfg_item.get("xlabel_text", "") if cfg_item.get("xlabel_enabled") else None
-                            ylabel_i = cfg_item.get("ylabel_text", "") if cfg_item.get("ylabel_enabled") else None
-
-                            normality_i = _group_normality(df_plot_i, group_i, value_i, order_i)
-                            stat_test_i = _default_pairwise_test(normality_i)
-
-                            pairs_i = []
-                            for pair in cfg_item.get("pairs", []):
-                                if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                                    a, b = pair
-                                    if a in order_i and b in order_i:
-                                        pairs_i.append((a, b))
-
-                            group_palette_i = cfg_item.get("color_cycle") if cfg_item.get("use_group_colors", True) else None
-
-                            ax_i, _, _ = core.plot_with_stats(
-                                df_plot_i,
-                                value=value_i,
-                                group=group_i,
-                                hue=hue_i,
-                                elements=elements_i,
-                                test=stat_test_i,
-                                title=title_i,
-                                xlabel=xlabel_i,
-                                ylabel=ylabel_i,
-                                style=cfg_item.get("style_choice"),
-                                figsize=figsize_i,
-                                staple_scale=cfg_item.get("staple_scale", 1.0),
-                                order=order_i,
-                                pairs=pairs_i,
-                                whisker_mode=cfg_item.get("whisker_mode", "quartiles"),
-                                bar_mode=cfg_item.get("bar_mode", "median"),
-                                bar_fill=cfg_item.get("bar_fill", "block"),
-                                group_palette=group_palette_i,
-                                rotate_xticks=cfg_item.get("rotate_xticks", False),
-                                y_zero=cfg_item.get("y_zero", False),
-                            )
-
-                            fig_i = ax_i.figure
-                            fig_buf = io.BytesIO()
-                            fig_i.savefig(fig_buf, format=fmt, bbox_inches="tight")
-                            plt.close(fig_i)
-                            fig_buf.seek(0)
-                            zf.writestr(f"{_safe_file_stem(plot_name)}.{fmt}", fig_buf.read())
+                            # df_item is already long/filtered; render long-form.
+                            spec_item.data.wide_form = False
+                            spec_item.data.wide_id_cols = []
+                            data = render_bytes(spec_item, df_item, fmt=fmt)
+                            zf.writestr(f"{_safe_file_stem(plot_name)}.{fmt}", data)
                         except Exception:
                             continue
 
@@ -987,6 +981,25 @@ def main() -> None:
                     mime="application/zip",
                     disabled=pdf_zip is None,
                 )
+
+            st.caption("Save spec / template (JSON)")
+            scols = st.columns(2, gap="small")
+            scols[0].download_button(
+                "Spec",
+                data=spec.to_json(),
+                file_name=f"{_safe_file_stem(selected_plot)}_spec.json",
+                mime="application/json",
+                help="Full plot spec (binding + appearance + stats). "
+                "Reproduce with: grism render spec.json data.csv",
+            )
+            scols[1].download_button(
+                "Template",
+                data=spec.to_template().to_json(),
+                file_name=f"{_safe_file_stem(selected_plot)}_template.json",
+                mime="application/json",
+                help="Reusable style/stats without the data binding. Reuse with: "
+                "grism apply template.json data.csv --group GROUP --value VALUE",
+            )
 
         with bottom_left:
             st.subheader("Stats")
